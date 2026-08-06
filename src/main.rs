@@ -9,7 +9,6 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 const WINDOW_W: i32 = 160;
 const WINDOW_H: i32 = 42;
@@ -42,12 +41,6 @@ const LIGHT_IDLE: COLORREF = COLORREF(0x00909090);
 const LIGHT_UNIT: COLORREF = COLORREF(0x00787878);
 const LIGHT_WARNING: COLORREF = COLORREF(0x003838C8);
 const CLASS_NAME: &str = "NetSpeedTaskbarWnd\0";
-const MENU_CLASS_NAME: &str = "NetSpeedPopupMenuWnd\0";
-const MENU_W: i32 = 148;
-const MENU_H: i32 = 76;
-const MENU_AUTOSTART_BOTTOM: i32 = 36;
-const MENU_EXIT_TOP: i32 = 40;
-const MENU_DISMISS_TIMER: usize = 20;
 const REFRESH_TIMER: usize = 1;
 const REPOS_TIMER: usize = 2;
 const PAINT_TIMER: usize = 3;
@@ -205,6 +198,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_RBUTTONUP => {
             show_context_menu(hwnd);
             LRESULT(0)
+        }
+        WM_ERASEBKGND => {
+            // Fill with the sampled background immediately so moved/resized
+            // regions never show a black flash before WM_PAINT arrives.
+            let hdc = HDC(wp.0 as isize);
+            let mut rect = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rect);
+            let fallback = if LIGHT_THEME { LIGHT_BG } else { DARK_BG };
+            let bg_color = sample_taskbar_color(fallback);
+            let brush = CreateSolidBrush(bg_color);
+            FillRect(hdc, &rect, brush);
+            let _ = DeleteObject(brush);
+            LRESULT(1)
         }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -368,137 +374,39 @@ fn clear_autostart() {
         .output();
 }
 
-unsafe extern "system" fn menu_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    match msg {
-        WM_CREATE => {
-            let cs = &*(lp.0 as *const CREATESTRUCTW);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
-            let _ = SetTimer(hwnd, MENU_DISMISS_TIMER, 30, None);
-            LRESULT(0)
-        }
-        WM_TIMER if wp.0 == MENU_DISMISS_TIMER => {
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let mut rect = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut rect);
-            let inside = pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom;
-            let left_down = (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0;
-            let right_down = (GetAsyncKeyState(0x02) as u16 & 0x8000) != 0;
-            if (!inside && (left_down || right_down)) || (GetAsyncKeyState(0x1B) as u16 & 0x8000) != 0 {
-                let _ = DestroyWindow(hwnd);
-            }
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let _ = InvalidateRect(hwnd, None, true);
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            let x = (lp.0 & 0xffff) as i16 as i32;
-            let y = ((lp.0 >> 16) & 0xffff) as i16 as i32;
-            let parent = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-            let inside = x >= 0 && x < MENU_W && y >= 0 && y < MENU_H;
-            if inside && y < MENU_AUTOSTART_BOTTOM {
-                if is_autostart() { clear_autostart(); } else { ensure_autostart(); }
-                let _ = InvalidateRect(parent, None, true);
-            } else if inside && y >= MENU_EXIT_TOP {
-                let _ = PostMessageW(parent, WM_CLOSE, WPARAM(0), LPARAM(0));
-            }
-            let _ = DestroyWindow(hwnd);
-            LRESULT(0)
-        }
-        WM_NCDESTROY => {
-            let _ = KillTimer(hwnd, MENU_DISMISS_TIMER);
-            LRESULT(0)
-        },
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rect = RECT::default();
-            let _ = GetClientRect(hwnd, &mut rect);
-            let fallback = if LIGHT_THEME { LIGHT_BG } else { DARK_BG };
-            let bg_color = sample_taskbar_color(fallback);
-            let bg = CreateSolidBrush(bg_color);
-            FillRect(hdc, &rect, bg);
-            let _ = DeleteObject(bg);
-
-            let border_color = if LIGHT_THEME { LIGHT_DIVIDER } else { DARK_DIVIDER };
-            let border = CreateSolidBrush(border_color);
-            FrameRect(hdc, &rect, border);
-            let _ = DeleteObject(border);
-
-            let font = CreateFontW(
-                14, 0, 0, 0, 400, 0, 0, 0,
-                DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32, CLEARTYPE_QUALITY.0 as u32,
-                FF_DONTCARE.0 as u32, windows::core::w!("Segoe UI"),
-            );
-            let old_font = SelectObject(hdc, font);
-            SetBkColor(hdc, bg_color);
-            SetBkMode(hdc, OPAQUE);
-            let text_color = if LIGHT_THEME { COLORREF(0x00333333) } else { COLORREF(0x00EEEEEE) };
-            let hover_color = if LIGHT_THEME { COLORREF(0x00E4E4E4) } else { COLORREF(0x004A4A4A) };
-            let mut cursor = POINT::default();
-            let _ = GetCursorPos(&mut cursor);
-            let mut menu_rect = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut menu_rect);
-            let local_x = cursor.x - menu_rect.left;
-            let local_y = cursor.y - menu_rect.top;
-            let hover_auto = local_x >= 0 && local_x < MENU_W && local_y >= 3 && local_y < MENU_AUTOSTART_BOTTOM;
-            let hover_exit = local_x >= 0 && local_x < MENU_W && local_y >= MENU_EXIT_TOP && local_y < MENU_H - 3;
-            let hover_brush = CreateSolidBrush(hover_color);
-            if hover_auto {
-                let hover_rect = RECT { left: 3, top: 3, right: MENU_W - 3, bottom: MENU_AUTOSTART_BOTTOM };
-                FillRect(hdc, &hover_rect, hover_brush);
-            }
-            if hover_exit {
-                let hover_rect = RECT { left: 3, top: MENU_EXIT_TOP, right: MENU_W - 3, bottom: MENU_H - 3 };
-                FillRect(hdc, &hover_rect, hover_brush);
-            }
-            let _ = DeleteObject(hover_brush);
-            SetTextColor(hdc, text_color);
-            let mut auto_rect = RECT { left: 14, top: 5, right: MENU_W - 8, bottom: 32 };
-            let mut auto_text = "开机自启".encode_utf16().collect::<Vec<_>>();
-            DrawTextW(hdc, &mut auto_text, &mut auto_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            let mut exit_rect = RECT { left: 14, top: 41, right: MENU_W - 8, bottom: 68 };
-            let mut exit_text = "退出".encode_utf16().collect::<Vec<_>>();
-            DrawTextW(hdc, &mut exit_text, &mut exit_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            if is_autostart() {
-                SetTextColor(hdc, if LIGHT_THEME { COLORREF(0x003060A0) } else { COLORREF(0x0088CCFF) });
-                let mut check = "✓".encode_utf16().collect::<Vec<_>>();
-                let mut check_rect = RECT { left: MENU_W - 27, top: 5, right: MENU_W - 8, bottom: 32 };
-                DrawTextW(hdc, &mut check, &mut check_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-            let divider = CreateSolidBrush(border_color);
-            let line = RECT { left: 10, top: 37, right: MENU_W - 10, bottom: 38 };
-            FillRect(hdc, &line, divider);
-            let _ = DeleteObject(divider);
-            SelectObject(hdc, old_font);
-            let _ = DeleteObject(font);
-            let _ = EndPaint(hwnd, &ps);
-            let _ = hover_color;
-            LRESULT(0)
-        }
-        WM_DESTROY => LRESULT(0),
-        _ => DefWindowProcW(hwnd, msg, wp, lp),
-    }
-}
-
 unsafe fn show_context_menu(hwnd: HWND) {
+    let menu = match CreatePopupMenu() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let autostart_on = is_autostart();
+    let flags = if autostart_on { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+    let _ = AppendMenuW(menu, flags, 1, windows::core::w!("开机自启"));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    let _ = AppendMenuW(menu, MF_STRING, 2, windows::core::w!("退出"));
+
+    // The window is foreground-capable (no WS_EX_NOACTIVATE), so it can be
+    // used directly as the popup owner. The classic WM_NULL after
+    // SetForegroundWindow lets the foreground switch finish; without it the
+    // menu may not receive the focus change needed to dismiss on outside click.
+    let _ = SetForegroundWindow(hwnd);
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
-    let menu_class: Vec<u16> = MENU_CLASS_NAME.encode_utf16().collect();
-    let hinst = GetModuleHandleW(None).unwrap();
-    let menu = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-        windows::core::PCWSTR(menu_class.as_ptr()),
-        windows::core::w!("NetSpeedMenu"),
-        WS_POPUP,
-        pt.x - MENU_W + 8, pt.y - MENU_H - 4, MENU_W, MENU_H,
-        None, None, hinst, Some(hwnd.0 as *const std::ffi::c_void),
+    let cmd = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
+        pt.x, pt.y,
+        0, hwnd, None,
     );
-    if menu.0 != 0 {
-        let _ = SetWindowPos(menu, HWND_TOPMOST, pt.x - MENU_W + 8, pt.y - MENU_H - 4, MENU_W, MENU_H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    let _ = DestroyMenu(menu);
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+
+    let cmd_id = cmd.0 as usize;
+    if cmd_id == 1 {
+        if autostart_on { clear_autostart(); } else { ensure_autostart(); }
+    } else if cmd_id == 2 {
+        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -582,9 +490,8 @@ fn main() {
     // Autostart by default
     ensure_autostart();
 
-    // Register the taskbar class and the non-activating custom popup class.
+    // Register the taskbar class.
     let class_name: Vec<u16> = CLASS_NAME.encode_utf16().collect();
-    let menu_class_name: Vec<u16> = MENU_CLASS_NAME.encode_utf16().collect();
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap();
         let wc = WNDCLASSW {
@@ -595,21 +502,14 @@ fn main() {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        let menu_wc = WNDCLASSW {
-            lpfnWndProc: Some(menu_wnd_proc),
-            hInstance: hinst.into(),
-            lpszClassName: windows::core::PCWSTR(menu_class_name.as_ptr()),
-            style: CS_HREDRAW | CS_VREDRAW,
-            ..Default::default()
-        };
-        RegisterClassW(&menu_wc);
     }
 
-    // Opaque sampled taskbar-color window; keeping it non-layered preserves
-    // ClearType sharpness.
+    // Create window — topmost tool window, foreground-capable so
+    // TrackPopupMenu displays correctly. WS_EX_NOACTIVATE would prevent
+    // the popup from ever becoming foreground (menu never appears).
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             windows::core::PCWSTR(class_name.as_ptr()),
             windows::core::w!("NetSpeed"),
             WS_POPUP,
