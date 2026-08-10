@@ -96,3 +96,36 @@
   是其官方注释提到的已知坑：若将来用户反馈深色模式下菜单不弹，检查采样背景是否为纯黑
   （0x000000），可参考其做法把背景色至少设为 1。当前 DARK_BG=0x302C2C 与采样色均非纯黑，
   实测不触发。
+
+---
+
+## 追加记录（Pi，2026-08-10，第 2 轮）— COMPARE 方案的逐项验证与收尾
+
+### 逐项验证结果（真实右键 = SetCursorPos + mouse_event，已验证有效）
+
+1. **近黑背景抑制假设：否定**。把采样背景强制改为 0x202020（近黑）后编译运行，
+   真实右键仍正常弹出原生 #32768 菜单。当前系统为浅色任务栏（采样色 ≈ 0xFEF9F8），
+   深色/近黑背景不是本机菜单问题的成因。
+2. **SetParent 嵌入任务栏：不可行，已放弃**（有实机证据）：
+   - 嵌入 TrayNotifyWnd：我们的窗口位于托盘左侧，client x = -166 落在父窗口
+     client 区之外 → 命中测试/鼠标输入完全不达窗口。
+   - 嵌入 Shell_TrayWnd：位置正确、WindowFromPoint/RealChildWindowFromPoint 均命中，
+     但 **鼠标消息被 Win11 25H2 XAML 任务栏拦截，WM_RBUTTONDOWN 永远收不到**；
+     只有 PostMessage 直接发消息才能弹菜单。嵌入还会让 FindWindowW 找不到窗口
+     （不再是顶级窗口），且 explorer 重启会销毁子窗口。
+   - 结论：菜单不弹与遮挡/嵌入无关；嵌入反而破坏输入，保持独立顶级窗口 + TOPMOST。
+3. **TrackPopupMenu 简化：已采纳**。去掉 SetForegroundWindow + WM_NULL 预热，
+   flags 改为 `TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD`（对齐 TrafficMonitor），
+   实测真实右键菜单正常弹出、z-order 第 4 位（高于 Shell_TrayWnd 第 7 位）、
+   点击外部自动关闭、开机自启勾选切换、退出正常。
+4. **背景钳制非纯黑：已采纳**。`refresh_taskbar_color` 采样后每通道 `max(0x10)`，
+   防御 Win11 深色任务栏 + 纯黑背景的已知坑。
+5. **顺带修复单实例 bug**：原 `CreateMutexW` 未检查 `ERROR_ALREADY_EXISTS`，
+   导致多实例可同时运行；现正确退出第二实例（实测启动第二个实例后仅剩一个进程）。
+
+### 收尾
+
+- 已删除全部调试埋点（netspeed-debug.log 不再写入）。
+- 验证输入注意：本会话中 SendInput 偶发不送达（Start 菜单/任务栏菜单都不响应），
+  而 `SetCursorPos + mouse_event` 稳定有效；远程会话下两者行为可能不一致，
+  判定菜单行为请以能稳定复现的注入方式为准。

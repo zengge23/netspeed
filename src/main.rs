@@ -146,9 +146,17 @@ unsafe fn refresh_taskbar_color() {
     }
     let _ = ReleaseDC(None, hdc);
     if count > 0 {
-        TASKBAR_COLOR = COLORREF(
-            (red / count) | ((green / count) << 8) | ((blue / count) << 16),
-        );
+        let r = red / count;
+        let g = green / count;
+        let b = blue / count;
+        // Clamp channels away from pure black: on Win11 dark taskbars the
+        // sampled color can be ~0x202020; keeping every channel >= 0x10 avoids
+        // any edge case where a pure-black surface interferes with popup menus
+        // (TrafficMonitor clamps to >= 1 for the same reason).
+        let r = r.max(0x10);
+        let g = g.max(0x10);
+        let b = b.max(0x10);
+        TASKBAR_COLOR = COLORREF(r | (g << 8) | (b << 16));
     }
 }
 
@@ -418,17 +426,14 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, 2, windows::core::w!("退出"));
 
-    // The window is foreground-capable (no WS_EX_NOACTIVATE), so it can be
-    // used directly as the popup owner. The classic WM_NULL after
-    // SetForegroundWindow lets the foreground switch finish; without it the
-    // menu may not receive the focus change needed to dismiss on outside click.
-    let _ = SetForegroundWindow(hwnd);
-    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
+    // TrafficMonitor-style minimal call: no SetForegroundWindow/WM_NULL warm-up,
+    // no TPM_NOANIMATION. TPM_LEFTALIGN+TPM_RIGHTBUTTON matches the reference
+    // implementation; TPM_RETURNCMD keeps the command id for our handlers.
     let cmd = TrackPopupMenu(
         menu,
-        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
+        TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
         pt.x, pt.y,
         0, hwnd, None,
     );
@@ -509,13 +514,16 @@ fn main() {
     // Detect theme at startup (before first paint)
     unsafe { LIGHT_THEME = system_light_theme(); }
 
-    // Single instance
+    // Single instance: bail out if another instance already holds the mutex.
     unsafe {
-        let h = match CreateMutexW(None, true, windows::core::w!("Global\\NetSpeed_SingleInstance")) {
-            Ok(handle) => handle,
-            Err(_) => return,
-        };
-        let _ = h;
+        let h = CreateMutexW(None, true, windows::core::w!("Global\\NetSpeed_SingleInstance"));
+        if h.is_err() { return; }
+        // CreateMutexW succeeds with ERROR_ALREADY_EXISTS when the mutex
+        // already exists — that means another instance is running.
+        if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS.0 as i32) {
+            return;
+        }
+        let _ = h; // keep the handle alive for the process lifetime
     }
     // Net thread
     std::thread::spawn(net_thread);
