@@ -45,7 +45,6 @@ const REFRESH_TIMER: usize = 1;
 const REPOS_TIMER: usize = 2;
 const PAINT_TIMER: usize = 3;
 const REFRESH_INTERVAL_MS: u32 = 100;
-const RUN_VALUE: &str = "NetSpeed";
 
 static mut DOWN: f64 = 0.0;
 static mut UP: f64 = 0.0;
@@ -199,6 +198,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             show_context_menu(hwnd);
             LRESULT(0)
         }
+        WM_CONTEXTMENU => {
+            show_context_menu(hwnd);
+            LRESULT(0)
+        }
         WM_ERASEBKGND => {
             // Fill with the sampled background immediately so moved/resized
             // regions never show a black flash before WM_PAINT arrives.
@@ -345,33 +348,63 @@ unsafe fn reposition(hwnd: HWND) {
 
 // ─── Autostart (registry Run key) ─────────────────────────────
 
-fn is_autostart() -> bool {
-    use std::process::Command;
-    let out = Command::new("reg")
-        .args(["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "NetSpeed"])
-        .output();
-    match out {
-        Ok(o) => o.status.success() && String::from_utf8_lossy(&o.stdout).contains("NetSpeed"),
-        Err(_) => false,
+const RUN_KEY: windows::core::PCWSTR = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+
+/// Read the Run\\NetSpeed value directly via the Win32 registry API.
+/// Never spawn a child process from the UI thread: `reg.exe` launches a
+/// console host that can stall (esp. over RDP) and breaks TrackPopupMenu
+/// (menu never appears / wndproc deadlocks).
+fn read_autostart() -> Option<String> {
+    unsafe {
+        let mut key = HKEY::default();
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &mut key);
+        if r != ERROR_SUCCESS { return None; }
+        let mut buf = [0u16; 1024];
+        let mut size = (buf.len() * 2) as u32;
+        let r2 = RegQueryValueExW(
+            key,
+            windows::core::w!("NetSpeed"),
+            None,
+            None,
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(key);
+        if r2 != ERROR_SUCCESS { return None; }
+        let len = (size as usize) / 2;
+        Some(String::from_utf16_lossy(&buf[..len]).trim_end_matches('\0').to_string())
     }
 }
 
+fn is_autostart() -> bool {
+    read_autostart().is_some()
+}
+
 fn ensure_autostart() {
-    use std::process::Command;
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => return,
     };
-    let _ = Command::new("reg")
-        .args(["add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &exe, "/f"])
-        .output();
+    unsafe {
+        let mut key = HKEY::default();
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_WRITE, &mut key);
+        if r != ERROR_SUCCESS { return; }
+        let mut data: Vec<u16> = exe.encode_utf16().collect();
+        data.push(0);
+        let bytes = std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2);
+        let _ = RegSetValueExW(key, windows::core::w!("NetSpeed"), 0, REG_SZ, Some(bytes));
+        let _ = RegCloseKey(key);
+    }
 }
 
 fn clear_autostart() {
-    use std::process::Command;
-    let _ = Command::new("reg")
-        .args(["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "NetSpeed", "/f"])
-        .output();
+    unsafe {
+        let mut key = HKEY::default();
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_WRITE, &mut key);
+        if r != ERROR_SUCCESS { return; }
+        let _ = RegDeleteValueW(key, windows::core::w!("NetSpeed"));
+        let _ = RegCloseKey(key);
+    }
 }
 
 unsafe fn show_context_menu(hwnd: HWND) {
