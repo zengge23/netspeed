@@ -129,3 +129,29 @@
 - 验证输入注意：本会话中 SendInput 偶发不送达（Start 菜单/任务栏菜单都不响应），
   而 `SetCursorPos + mouse_event` 稳定有效；远程会话下两者行为可能不一致，
   判定菜单行为请以能稳定复现的注入方式为准。
+
+---
+
+## 追加记录（Pi，2026-08-10，第 3 轮）— 收尾：嵌入重试被否，回退独立顶层窗口
+
+两个并发代理留下的未提交改动（SetParent 嵌入任务栏 + 大量调试埋点）经审查与实测后**回退**：
+
+- **嵌入方案再次实测否决**：临时埋点确认，嵌入 Shell_TrayWnd 后真实右键**收不到任何消息**
+  （WM_RBUTTONDOWN/UP/CONTEXTMENU 均无），任务栏 XAML 弹出它自己的菜单（Xaml_WindowedPopupClass）。
+  与第 2 轮结论一致（Win11 25H2 XAML 任务栏吞掉子窗口鼠标按钮输入）。最终保留
+  **独立顶级窗口 + WS_EX_TOPMOST/HWND_TOPMOST**（round-2 已验证方案）。
+- **顺带发现**：WS_POPUP 窗口经 SetParent 后 `GetParent()` 返回 owner（NULL）而非父窗口，
+  会触发每 3 秒重复 SetParent（旧进程 16h 日志里 19196 次 "embed: ok"）；正确写法是
+  `GetAncestor(hwnd, GA_PARENT)`。此坑在嵌入代码回退后已无关紧要，留档备查。
+- 保留的三项改进：背景钳制 `clamp_bg()`（每通道 ≥0x10，采样与 fallback 均生效）、
+  TPM 简化（`TPM_LEFTALIGN|TPM_RIGHTBUTTON|TPM_RETURNCMD`，去掉菜单关闭后的 PostMessage(WM_NULL)）、
+  单实例 mutex 检查 ERROR_ALREADY_EXISTS。
+- 清理：全部 dlog/tlog 埋点、仓库根目录临时 ps1 脚本、netspeed-debug.log 不再生成（实测确认）。
+- 验证（真实输入 = SetCursorPos+mouse_event；本会话键盘注入可靠，鼠标按钮注入约 40% 概率被
+  RDP 吞掉，判定以多次复现为准）：
+  - 真实右键 → 原生 #32768 菜单弹出，z-order #7 > Shell_TrayWnd #13（最顶层）✓
+  - 点击外部关闭 ✓；开机自启项点击切换注册表（双向）✓；退出项点击进程正常结束 ✓
+  - 窗口区域右键连拍 9 帧：0 近黑像素，最小通道 56（文字本身），无闪黑框 ✓
+  - 窗口 160×42 物理像素（3840×2160 @ 144DPI），托盘左侧 6px、垂直居中 ✓
+- **DPI 陷阱**：PowerShell（DPI-unaware）的 GetWindowRect/GetPixel/GetSystemMetrics 坐标会被
+  1.5x 虚拟化（160×42 窗口显示为 107×28）；验证物理坐标前须先 `SetProcessDpiAwareness(2)`。

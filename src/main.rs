@@ -106,10 +106,21 @@ fn read_cpu_usage(previous: &mut Option<(u64, u64, u64)>) -> f32 {
     result.clamp(0.0, 100.0)
 }
 
+/// Clamp every RGB channel to >= 0x10 so a sampled/fallback background can
+/// never be pure black. Win11 dark taskbars can suppress popup menus over a
+/// pure-black surface in some configurations (TrafficMonitor clamps to >= 1
+/// for the same reason).
+fn clamp_bg(c: COLORREF) -> COLORREF {
+    let r = (c.0 & 0xff).max(0x10);
+    let g = ((c.0 >> 8) & 0xff).max(0x10);
+    let b = ((c.0 >> 16) & 0xff).max(0x10);
+    COLORREF(r | (g << 8) | (b << 16))
+}
+
 fn sample_taskbar_color(fallback: COLORREF) -> COLORREF {
     unsafe {
         let cached = TASKBAR_COLOR;
-        if cached.0 != 0 { cached } else { fallback }
+        if cached.0 != 0 { cached } else { clamp_bg(fallback) }
     }
 }
 
@@ -153,10 +164,7 @@ unsafe fn refresh_taskbar_color() {
         // sampled color can be ~0x202020; keeping every channel >= 0x10 avoids
         // any edge case where a pure-black surface interferes with popup menus
         // (TrafficMonitor clamps to >= 1 for the same reason).
-        let r = r.max(0x10);
-        let g = g.max(0x10);
-        let b = b.max(0x10);
-        TASKBAR_COLOR = COLORREF(r | (g << 8) | (b << 16));
+        TASKBAR_COLOR = clamp_bg(COLORREF(r | (g << 8) | (b << 16)));
     }
 }
 
@@ -333,6 +341,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 
 // ─── Window positioning ───────────────────────────────────────
 
+/// Park the window on the taskbar, immediately left of the notification area,
+/// vertically centered. The window stays a standalone top-level tool window
+/// (HWND_TOPMOST) — embedding it into Shell_TrayWnd with SetParent was tested
+/// twice and rejected: on the Win11 25H2 XAML taskbar the taskbar island
+/// swallows the mouse button input, so our window never receives the
+/// right-click and the menu cannot open.
 unsafe fn reposition(hwnd: HWND) {
     let tb = FindWindowW(windows::core::w!("Shell_TrayWnd"), None);
     if tb.0 == 0 { return; }
@@ -428,9 +442,9 @@ unsafe fn show_context_menu(hwnd: HWND) {
 
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
-    // TrafficMonitor-style minimal call: no SetForegroundWindow/WM_NULL warm-up,
-    // no TPM_NOANIMATION. TPM_LEFTALIGN+TPM_RIGHTBUTTON matches the reference
-    // implementation; TPM_RETURNCMD keeps the command id for our handlers.
+    // TrafficMonitor-style minimal call: no SetForegroundWindow / WM_NULL
+    // warm-up, no TPM_NOANIMATION. TPM_LEFTALIGN+TPM_RIGHTBUTTON matches the
+    // reference implementation; TPM_RETURNCMD keeps the command id for us.
     let cmd = TrackPopupMenu(
         menu,
         TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
@@ -438,7 +452,6 @@ unsafe fn show_context_menu(hwnd: HWND) {
         0, hwnd, None,
     );
     let _ = DestroyMenu(menu);
-    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
 
     let cmd_id = cmd.0 as usize;
     if cmd_id == 1 {
