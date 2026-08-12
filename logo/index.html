@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>netspeed logo 概念对比</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #f3f3f3;
+    color: #1a1a1a;
+    padding: 40px;
+  }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .card {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.06);
+    cursor: pointer;
+    transition: transform .15s ease, box-shadow .15s ease;
+    border: 2px solid transparent;
+  }
+  .card:hover { transform: translateY(-3px); box-shadow: 0 6px 16px rgba(0,0,0,.1); }
+  .card.selected { border-color: #385cb8; box-shadow: 0 6px 16px rgba(56,92,184,.15); }
+  .card h3 { font-size: 15px; font-weight: 600; margin: 14px 0 4px; }
+  .card .stance { font-size: 12px; color: #888; margin-bottom: 10px; }
+  .card .desc { font-size: 12.5px; color: #555; line-height: 1.5; }
+  .preview { display: flex; align-items: center; justify-content: center; height: 200px; background: linear-gradient(180deg,#fafafa,#f0f0f0); border-radius: 8px; }
+  .preview .dark { display: none; }
+  /* toggle for light/dark bg preview */
+  .preview.dark-bg { background: linear-gradient(180deg,#2b2b2b,#1e1e1e); }
+  .preview.dark-bg .dark { display: block; }
+  .preview.dark-bg .light { display: none; }
+  .sizes { display: flex; gap: 18px; align-items: flex-end; justify-content: center; margin-top: 20px; }
+  .sizes .size { text-align: center; }
+  .sizes .size .lbl { font-size: 10px; color: #999; margin-top: 4px; }
+  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; }
+  .toolbar button {
+    padding: 8px 16px; border-radius: 6px; border: none; font-size: 13px; font-weight: 600;
+    background: #385cb8; color: #fff; cursor: pointer;
+  }
+  .toolbar button:hover { background: #2f4ea0; }
+  .toolbar .hint { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+  <h1>netspeed — 安装包 Logo 概念</h1>
+  <div class="sub">三个不同设计立场 · 点击卡片选定 · 切换深/浅背景查看适配</div>
+
+  <div class="toolbar">
+    <button onclick="toggleBg()">切换深/浅背景</button>
+    <span class="hint" id="bgstate">当前：浅色背景预览</span>
+  </div>
+
+  <div class="grid">
+
+    <!-- Concept A: Fluent 圆角块 + 双向箭头 -->
+    <div class="card" data-name="A" onclick="select(this)">
+      <div class="preview">
+        <svg class="light" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradA" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#4a7ddb"/>
+              <stop offset="100%" stop-color="#2f4ea0"/>
+            </linearGradient>
+          </defs>
+          <!-- Fluent rounded square tile -->
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradA)"/>
+          <!-- down arrow (green, receive) -->
+          <path d="M62 46 v30 h-14 l22 24 22-24 h-14 v-30 z" fill="#9edb6c" opacity="0.95"/>
+          <!-- up arrow (orange/amber, send) -->
+          <path d="M98 114 v-30 h14 l-22-24-22 24 h14 v30 z" fill="#ffd08a" opacity="0.95"/>
+        </svg>
+        <svg class="dark" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradAD" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#5b8cff"/>
+              <stop offset="100%" stop-color="#3b64d8"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradAD)"/>
+          <path d="M62 46 v30 h-14 l22 24 22-24 h-14 v-30 z" fill="#b8f090" opacity="0.95"/>
+          <path d="M98 114 v-30 h14 l-22-24-22 24 h14 v30 z" fill="#ffd88f" opacity="0.95"/>
+        </svg>
+      </div>
+      <div class="sizes">
+        <div class="size"><svg width="48" height="48" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#3b64d8"/><path d="M62 46 v30 h-14 l22 24 22-24 h-14 v-30 z" fill="#b8f090"/><path d="M98 114 v-30 h14 l-22-24-22 24 h14 v30 z" fill="#ffd88f"/></svg><div class="lbl">48px</div></div>
+        <div class="size"><svg width="32" height="32" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#3b64d8"/><path d="M62 46 v30 h-14 l22 24 22-24 h-14 v-30 z" fill="#b8f090"/><path d="M98 114 v-30 h14 l-22-24-22 24 h14 v30 z" fill="#ffd88f"/></svg><div class="lbl">32px</div></div>
+        <div class="size"><svg width="16" height="16" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#3b64d8"/><path d="M62 46 v30 h-14 l22 24 22-24 h-14 v-30 z" fill="#b8f090"/><path d="M98 114 v-30 h14 l-22-24-22 24 h14 v30 z" fill="#ffd88f"/></svg><div class="lbl">16px</div></div>
+      </div>
+      <h3>A · Fluent 双向箭头</h3>
+      <div class="stance">Win11 圆角瓷砖 · 蓝底 · 绿下黄上</div>
+      <div class="desc">直接对应产品功能（↑发送/↓接收）。Fluent 风格圆角方块 + 渐变，蓝底与任务栏插件深色模式呼应。箭头形体大，小尺寸也清晰。</div>
+    </div>
+
+    <!-- Concept B: 速度表/波形 -->
+    <div class="card" data-name="B" onclick="select(this)">
+      <div class="preview">
+        <svg class="light" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradB" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0%" stop-color="#1f2937"/>
+              <stop offset="100%" stop-color="#374151"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradB)"/>
+          <!-- speed gauge arc -->
+          <circle cx="80" cy="92" r="46" fill="none" stroke="#3b82f6" stroke-width="10" stroke-dasharray="218 290" stroke-linecap="round" transform="rotate(135 80 92)"/>
+          <circle cx="80" cy="92" r="46" fill="none" stroke="#22c55e" stroke-width="10" stroke-dasharray="0 290 108 0" stroke-linecap="round" transform="rotate(135 80 92)"/>
+          <!-- needle -->
+          <line x1="80" y1="92" x2="80" y2="56" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
+          <circle cx="80" cy="92" r="8" fill="#fbbf24"/>
+          <!-- speed text -->
+          <text x="80" y="105" text-anchor="middle" font-size="18" font-weight="700" fill="#e5e7eb" font-family="Segoe UI">K/s</text>
+        </svg>
+        <svg class="dark" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradBD" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0%" stop-color="#111827"/>
+              <stop offset="100%" stop-color="#1f2937"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradBD)"/>
+          <circle cx="80" cy="92" r="46" fill="none" stroke="#60a5fa" stroke-width="10" stroke-dasharray="218 290" stroke-linecap="round" transform="rotate(135 80 92)"/>
+          <circle cx="80" cy="92" r="46" fill="none" stroke="#4ade80" stroke-width="10" stroke-dasharray="0 290 108 0" stroke-linecap="round" transform="rotate(135 80 92)"/>
+          <line x1="80" y1="92" x2="80" y2="56" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
+          <circle cx="80" cy="92" r="8" fill="#fbbf24"/>
+          <text x="80" y="105" text-anchor="middle" font-size="18" font-weight="700" fill="#e5e7eb" font-family="Segoe UI">K/s</text>
+        </svg>
+      </div>
+      <div class="sizes">
+        <div class="size"><svg width="48" height="48" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#1f2937"/><circle cx="80" cy="92" r="46" fill="none" stroke="#3b82f6" stroke-width="12" stroke-dasharray="218 290" stroke-linecap="round" transform="rotate(135 80 92)"/><circle cx="80" cy="92" r="46" fill="none" stroke="#22c55e" stroke-width="12" stroke-dasharray="0 290 108 0" stroke-linecap="round" transform="rotate(135 80 92)"/><line x1="80" y1="92" x2="80" y2="56" stroke="#fbbf24" stroke-width="7" stroke-linecap="round"/><circle cx="80" cy="92" r="9" fill="#fbbf24"/></svg><div class="lbl">48px</div></div>
+        <div class="size"><svg width="32" height="32" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#1f2937"/><circle cx="80" cy="92" r="46" fill="none" stroke="#3b82f6" stroke-width="14" stroke-dasharray="218 290" stroke-linecap="round" transform="rotate(135 80 92)"/><circle cx="80" cy="92" r="46" fill="none" stroke="#22c55e" stroke-width="14" stroke-dasharray="0 290 108 0" stroke-linecap="round" transform="rotate(135 80 92)"/><line x1="80" y1="92" x2="80" y2="56" stroke="#fbbf24" stroke-width="8" stroke-linecap="round"/><circle cx="80" cy="92" r="10" fill="#fbbf24"/></svg><div class="lbl">32px</div></div>
+        <div class="size"><svg width="16" height="16" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#1f2937"/><circle cx="80" cy="92" r="46" fill="none" stroke="#3b82f6" stroke-width="18" stroke-dasharray="218 290" stroke-linecap="round" transform="rotate(135 80 92)"/><line x1="80" y1="92" x2="80" y2="56" stroke="#fbbf24" stroke-width="10" stroke-linecap="round"/><circle cx="80" cy="92" r="11" fill="#fbbf24"/></svg><div class="lbl">16px</div></div>
+      </div>
+      <h3>B · 速度仪表盘</h3>
+      <div class="stance">深色仪表 · 蓝绿弧 + 琥珀指针</div>
+      <div class="desc">强调"实时速度"的仪表感，蓝绿双弧代表上下行。深色底在任务栏深色模式更融合。缺点：小尺寸时表盘细节会糊，16px 只剩弧+针。</div>
+    </div>
+
+    <!-- Concept C: 极简双箭头徽章 -->
+    <div class="card" data-name="C" onclick="select(this)">
+      <div class="preview">
+        <svg class="light" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradC" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#3a8a3a"/>
+              <stop offset="100%" stop-color="#2c6b2c"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradC)"/>
+          <!-- unified up-down chevron mark -->
+          <path d="M80 34 L102 56 H90 V80 H70 V56 H58 Z" fill="#ffffff" opacity="0.97"/>
+          <path d="M80 126 L58 104 H70 V80 H90 V104 H102 Z" fill="#b8f090"/>
+        </svg>
+        <svg class="dark" width="160" height="160" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="gradCD" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#4ade80"/>
+              <stop offset="100%" stop-color="#22a55e"/>
+            </linearGradient>
+          </defs>
+          <rect x="8" y="8" width="144" height="144" rx="30" fill="url(#gradCD)"/>
+          <path d="M80 34 L102 56 H90 V80 H70 V56 H58 Z" fill="#ffffff" opacity="0.97"/>
+          <path d="M80 126 L58 104 H70 V80 H90 V104 H102 Z" fill="#d3f5c3"/>
+        </svg>
+      </div>
+      <div class="sizes">
+        <div class="size"><svg width="48" height="48" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#2c6b2c"/><path d="M80 34 L102 56 H90 V80 H70 V56 H58 Z" fill="#fff"/><path d="M80 126 L58 104 H70 V80 H90 V104 H102 Z" fill="#b8f090"/></svg><div class="lbl">48px</div></div>
+        <div class="size"><svg width="32" height="32" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#2c6b2c"/><path d="M80 34 L102 56 H90 V80 H70 V56 H58 Z" fill="#fff"/><path d="M80 126 L58 104 H70 V80 H90 V104 H102 Z" fill="#b8f090"/></svg><div class="lbl">32px</div></div>
+        <div class="size"><svg width="16" height="16" viewBox="0 0 160 160"><rect x="8" y="8" width="144" height="144" rx="30" fill="#2c6b2c"/><path d="M80 34 L102 56 H90 V80 H70 V56 H58 Z" fill="#fff"/><path d="M80 126 L58 104 H70 V80 H90 V104 H102 Z" fill="#b8f090"/></svg><div class="lbl">16px</div></div>
+      </div>
+      <h3>C · 极简双箭头徽章</h3>
+      <div class="stance">绿色徽章 · 白/浅绿双箭头 · 无渐变依赖</div>
+      <div class="desc">最简形态：一个菱形上下箭头组合，任何尺寸都不糊。绿色呼应"下载绿"。扁平的 Win11 风格，无文字无弧线，最耐缩小。</div>
+    </div>
+
+  </div>
+
+  <script>
+    let darkBg = false;
+    function toggleBg() {
+      darkBg = !darkBg;
+      document.querySelectorAll('.preview').forEach(p => p.classList.toggle('dark-bg', darkBg));
+      document.getElementById('bgstate').textContent = darkBg ? '当前：深色背景预览' : '当前：浅色背景预览';
+    }
+    function select(card) {
+      document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+    }
+  </script>
+</body>
+</html>
