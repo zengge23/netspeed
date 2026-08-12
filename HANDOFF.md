@@ -1,8 +1,8 @@
 # netspeed — 会话交接存档
 
-更新：2026-08-12（上下文压缩前）
+更新：2026-08-12（图表渐变填充完成，待提交）
 
-## 项目状态：✅ 功能完成，Win10 测试中
+## 项目状态：✅ 功能完成，图表风格已定为渐变填充
 
 Rust 单 exe 任务栏网速/CPU/内存监控（TrafficMonitor 类），D2D+DComposition 渲染。
 
@@ -19,6 +19,9 @@ Rust 单 exe 任务栏网速/CPU/内存监控（TrafficMonitor 类），D2D+DCom
 - 渲染：D2D → DXGI swapchain（PREMULTIPLIED）→ DirectComposition；透明背景 + GRAYSCALE AA；**每帧 `ctx.Clear()`**（FillRectangle(alpha=0) 不清屏会重影）
 - 嵌入：SetParent(Shell_TrayWnd) + **保留 WS_POPUP**（不强制 WS_CHILD）；定位 HWND_TOP + 父客户区坐标（子窗口不能用 HWND_TOPMOST）
 - 闪烁修复：REFRESH_TIMER(100ms) 已删；REPOS_TIMER=1s（位置比较跳过 SetWindowPos）；PAINT 由 DIRTY 门控；text format 缓存（FORMAT_LEFT/RIGHT/ARROW static）
+- **窗口宽动态**：WINDOW_W 是 static mut（285 有图 / 177 无图），右键「显示图表」切换时重建 renderer + SetWindowPos resize + reposition（自适应不留空白）
+- **走势图 = 渐变填充**（用户选定）：PathGeometry 闭合路径（底部→曲线→底部）+ 垂直 LinearGradientBrush（顶部 alpha .55 → 底部透明）+ 曲线描边（Round cap/join）；GradientStopCollection 用 ctx 6 参版本（D2D1_COLOR_SPACE_SRGB/PREMULTIPLIED），FillGeometry 需 geom.cast::<ID2D1Geometry>()；CreateStrokeStyle 在 d2d_factory 用 PROPERTIES1
+- **菜单 6s 自动关闭**：show_context_menu spawn 线程 sleep 6s → 若 MENU_OPEN 则 PostMessage(#32768, WM_KEYDOWN VK_ESCAPE) 关闭 TrackPopupMenu 模态循环
 - Win11 定位：锚 `TrayNotifyWnd.left - WINDOW_W - gap`，`gap = 小组件开(TaskbarDa=1) ? 250 : 6`（避让天气图标，XAML 渲染 GDI 枚举不到）
 - Win10 定位：MSTaskSwWClass/MSTaskListWClass 右侧（EnumChildWindows 递归找）+ 托盘左缘钳制 + 通用避让遍历（枚举子窗口取最左避让位）
 - 位置 rescue：锚点 None 时回 LAST_X/LAST_Y（上次成功位置）；fast-path 与目标差 ≤40px 才算 in place
@@ -27,15 +30,15 @@ Rust 单 exe 任务栏网速/CPU/内存监控（TrafficMonitor 类），D2D+DCom
 - 菜单：WM_RBUTTONUP + WM_CONTEXTMENU 双分支 + MENU_OPEN 防重入；TPM_LEFTALIGN|TPM_RIGHTBUTTON 无 RETURNCMD，命令走 WM_COMMAND（1=开机自启 2=退出）
 - 图标/版本：embed-resource + resources/netspeed.rc（1 ICON + VERSIONINFO 0.3.0）
 
-## 布局常量（最终）
+## 布局常量（动态）
 
-WINDOW_W=177、WINDOW_H（运行时：Win11 42 / Win10 36）；ROW_LEFT=3、ARROW_RIGHT=24、SPEED_LEFT=26、SPEED_RIGHT=94（右对齐）、DIVIDER_X=98、STATUS_LEFT=106、STATUS_LABEL_RIGHT=132、STATUS_RIGHT=173（数值右对齐）；两行均分 h2=h/2、row_h=h2-3、up_top=2、down_top=h2+1
+WINDOW_W（运行时：有图 285 / 无图 177）、WINDOW_H（运行时：Win11 42 / Win10 36）；ROW_LEFT=3、ARROW_RIGHT=24、SPEED_LEFT=26；有图布局：speed_right=88、divider=142、status 146-175/215、网速图 90-138、CPU/内存图 219-281；无图布局：speed_right=94、divider=98、status 106-134/173（无图区）；两行均分 h2=h/2、row_h=h2-3、up_top=2、down_top=h2+1、graph_half=h2-3、graph_top1=2、graph_top2=h2+1
 
 ## 待办/未决
 
-1. **Win10 测试结果未反馈**（netspeed-v0.3.0-win10test.exe）——用户测完可能报位置/网速/菜单问题
-2. 开机自启默认写入注册表 Run（右键菜单可切换）
-3. 版本号 0.3.0（Cargo.toml / VERSIONINFO / 交付命名 三处同步）
+1. 实机确认渐变填充效果（用户已选此风格，待最终视觉验收）
+2. Win10 实机回归：图表开关自适应（285/177）在 Win10 36px 高度下的表现
+3. 版本号 0.3.0（Cargo.toml / VERSIONINFO / 交付命名 三处同步）——新功能后建议升 0.4.0
 
 ## 环境备忘
 

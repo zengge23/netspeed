@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>netspeed 图表效果预览</title>
+<style>
+  body { background:#1a1d24; color:#e8e8e8; font-family:"Segoe UI","Microsoft YaHei",sans-serif; margin:0; padding:24px; }
+  h1 { font-size:20px; font-weight:600; margin:0 0 6px; }
+  .sub { color:#8a8f98; font-size:13px; margin-bottom:20px; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+  .btn { background:#2a2f3a; border:1px solid #3a4150; color:#d0d5dd; padding:8px 16px; border-radius:6px;
+         cursor:pointer; font-size:13px; transition:all .15s; }
+  .btn:hover { background:#343b48; }
+  .btn.active { background:#3d6ef2; border-color:#3d6ef2; color:#fff; }
+  /* 模拟任务栏 */
+  .taskbar { background:#20242c; border-radius:8px; padding:14px 18px; display:inline-block; margin-bottom:14px; }
+  .tray-icons { float:right; display:flex; gap:6px; align-items:center; margin-left:20px; }
+  .tray-icons span { width:16px; height:16px; border-radius:50%; background:#39414f; display:inline-block; }
+  /* 插件窗口（285×42 物理，×3 放大 = 855×126） */
+  .plugin { width:855px; height:126px; background:transparent; position:relative; overflow:hidden;
+            border:1px dashed #4a5160; border-radius:4px; }
+  .plugin-row { height:63px; position:relative; display:flex; align-items:center; }
+  .arrow { width:66px; text-align:center; font-size:42px; font-weight:600; flex-shrink:0; }
+  .up { color:#e8a13c; } .down { color:#5ac45a; }
+  .val { width:186px; font-size:34px; font-weight:500; text-align:right; font-variant-numeric:tabular-nums; flex-shrink:0; }
+  .val small { font-size:22px; color:#9aa1ab; margin-left:4px; }
+  .grap-box { margin-left:12px; flex-shrink:0; }
+  .grap-box .lbl { font-size:13px; color:#9aa1ab; margin-bottom:2px; text-align:center; }
+  .divider { width:2px; height:110px; background:#5a6070; margin:0 18px; flex-shrink:0; }
+  .status { width:150px; font-size:30px; text-align:right; font-variant-numeric:tabular-nums; flex-shrink:0; }
+  .status small { font-size:16px; color:#9aa1ab; display:block; text-align:left; }
+  canvas { display:block; }
+  .note { color:#8a8f98; font-size:12px; margin-top:14px; max-width:880px; line-height:1.6; }
+  .label-wrap { display:flex; gap:18px; margin-top:18px; }
+  .label-item { display:flex; align-items:center; gap:6px; font-size:13px; color:#b8bec8; }
+  .swatch { width:14px; height:14px; border-radius:3px; }
+</style>
+</head>
+<body>
+<h1>netspeed 插件 — 图表效果预览</h1>
+<div class="sub">模拟 285×42 插件窗口（放大 3 倍显示）· 数据动态流动 · 点按钮切换图表风格</div>
+
+<div class="toolbar">
+  <button class="btn active" data-mode="bars">竖线图（当前）</button>
+  <button class="btn" data-mode="smooth">平滑曲线</button>
+  <button class="btn" data-mode="fill">渐变填充</button>
+  <button class="btn" data-mode="grid">网格+曲线</button>
+  <button class="btn" data-mode="glow">霓虹发光</button>
+  <button class="btn" data-mode="rounded">圆角条形</button>
+  <button class="btn" data-mode="line">细折线</button>
+</div>
+
+<div class="taskbar">
+  <div class="tray-icons"><span></span><span></span><span></span></div>
+  <div class="plugin" id="plugin">
+    <!-- Row 1 -->
+    <div class="plugin-row" style="border-bottom:1px solid #333a45;">
+      <div class="arrow up">↑</div>
+      <div class="val" id="upval">12.3 <small>K/s</small></div>
+      <div class="grap-box"><div class="lbl">上传</div><canvas id="cv-up" width="210" height="40"></canvas></div>
+      <div class="divider"></div>
+      <div class="status"><span id="cpuval">25%</span><small>CPU</small></div>
+      <div class="grap-box" style="margin-left:16px;"><div class="lbl">CPU</div><canvas id="cv-cpu" width="210" height="40"></canvas></div>
+    </div>
+    <!-- Row 2 -->
+    <div class="plugin-row">
+      <div class="arrow down">↓</div>
+      <div class="val" id="downval">45.6 <small>K/s</small></div>
+      <div class="grap-box"><div class="lbl">下载</div><canvas id="cv-down" width="210" height="40"></canvas></div>
+      <div class="divider"></div>
+      <div class="status"><span id="memval">60%</span><small>内存</small></div>
+      <div class="grap-box" style="margin-left:16px;"><div class="lbl">内存</div><canvas id="cv-mem" width="210" height="40"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<div class="label-wrap">
+  <div class="label-item"><span class="swatch" style="background:#e8a13c"></span>上传</div>
+  <div class="label-item"><span class="swatch" style="background:#5ac45a"></span>下载</div>
+  <div class="label-item"><span class="swatch" style="background:#5a8dee"></span>CPU</div>
+  <div class="label-item"><span class="swatch" style="background:#b07cf0"></span>内存</div>
+</div>
+
+<div class="note">
+  说明：当前实装是「竖线图」（每列一条竖线，高度=数值，TrafficMonitor 风格）。其余 6 种是 D2D 可实现的美化方向——
+  平滑曲线（贝塞尔插值）、渐变填充（曲线下方淡色过渡）、网格背景、霓虹发光（半透明光晕）、圆角条形、细折线。
+  你选中的效果我直接改成插件里的绘制代码。窗口宽度/高度、每张图的位置也可以按你选的风格微调。
+</div>
+
+<script>
+const mode = { name: 'bars' };
+const W = 210, H = 40;
+const hist = { up: [], down: [], cpu: [], mem: [] };
+const colors = { up:'#e8a13c', down:'#5ac45a', cpu:'#5a8dee', mem:'#b07cf0' };
+
+function initHist() {
+  for (const k of ['up','down','cpu','mem']) hist[k] = [];
+  for (let i=0;i<W;i++){ hist.up.push(0); hist.down.push(0); hist.cpu.push(30+Math.random()*10); hist.mem.push(55+Math.random()*8); }
+}
+function push(k, v){ hist[k].push(v); if(hist[k].length>W) hist[k].shift(); }
+
+// 模拟数据
+function step() {
+  const base = 20 + Math.sin(Date.now()/3000)*8;
+  const spike = Math.random()<0.08 ? 25+Math.random()*30 : 0;
+  push('up', Math.max(0, base*0.4 + Math.random()*8 + spike*0.3));
+  push('down', Math.max(0, base + Math.random()*15 + spike));
+  push('cpu', Math.min(100, 28 + Math.sin(Date.now()/5000)*12 + Math.random()*8));
+  push('mem', Math.min(100, 58 + Math.sin(Date.now()/8000)*4 + Math.random()*2));
+  // 数值文字
+  const u = hist.up[hist.up.length-1], d = hist.down[hist.down.length-1];
+  const cu = hist.cpu[hist.cpu.length-1], mu = hist.mem[hist.mem.length-1];
+  document.getElementById('upval').innerHTML = u.toFixed(1)+' <small>K/s</small>';
+  document.getElementById('downval').innerHTML = d.toFixed(1)+' <small>K/s</small>';
+  document.getElementById('cpuval').textContent = Math.round(cu)+'%';
+  document.getElementById('memval').textContent = Math.round(mu)+'%';
+}
+
+// 绘制
+function draw(cv, key) {
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const data = hist[key];
+  const c = colors[key];
+
+  if (mode.name === 'bars') {
+    // 竖线图：每列 1px 竖线，从底往上
+    ctx.fillStyle = c;
+    for (let x=0; x<W; x++) {
+      const v = data[x]||0;
+      const hgt = Math.max(1, v/100*H);
+      ctx.fillRect(x, H-hgt, 1, hgt);
+    }
+  } else if (mode.name === 'smooth') {
+    // 平滑曲线（贝塞尔）
+    ctx.strokeStyle = c; ctx.lineWidth = 1.6; ctx.lineJoin='round'; ctx.lineCap='round';
+    ctx.beginPath();
+    for (let x=0; x<W; x++) {
+      const y = H - (data[x]||0)/100*H;
+      if (x===0) ctx.moveTo(x,y);
+      else {
+        const px = x-1, py = H - (data[x-1]||0)/100*H;
+        const mx = (px+x)/2;
+        ctx.bezierCurveTo(mx, py, mx, y, x, y);
+      }
+    }
+    ctx.stroke();
+  } else if (mode.name === 'fill') {
+    // 渐变填充
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, c+'cc'); g.addColorStop(1, c+'00');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(0,H);
+    for (let x=0; x<W; x++) ctx.lineTo(x, H-(data[x]||0)/100*H);
+    ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = c; ctx.lineWidth=1.4; ctx.beginPath();
+    for (let x=0; x<W; x++) {
+      const y = H-(data[x]||0)/100*H;
+      x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  } else if (mode.name === 'grid') {
+    // 网格背景 + 曲线
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+    for (let gy=0; gy<=H; gy+=10) { ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); }
+    ctx.strokeStyle = c; ctx.lineWidth=1.4;
+    ctx.beginPath();
+    for (let x=0; x<W; x++) {
+      const y = H-(data[x]||0)/100*H;
+      x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  } else if (mode.name === 'glow') {
+    // 霓虹发光
+    ctx.shadowColor = c; ctx.shadowBlur = 6;
+    ctx.strokeStyle = c; ctx.lineWidth=1.6;
+    ctx.beginPath();
+    for (let x=0; x<W; x++) {
+      const y = H-(data[x]||0)/100*H;
+      x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    // 底部光晕
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0, c+'55'); g.addColorStop(1, c+'00');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.moveTo(0,H);
+    for (let x=0; x<W; x++) ctx.lineTo(x, H-(data[x]||0)/100*H);
+    ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+  } else if (mode.name === 'rounded') {
+    // 圆角条形（每 2px 一根圆角条）
+    ctx.fillStyle = c;
+    const bw = 2;
+    for (let x=0; x<W; x+=bw+1) {
+      const v = data[x]||0;
+      const hgt = Math.max(1, v/100*H);
+      roundRect(ctx, x, H-hgt, bw, hgt, 1);
+      ctx.fill();
+    }
+  } else if (mode.name === 'line') {
+    // 细折线 + 端点
+    ctx.strokeStyle = c; ctx.lineWidth=1; ctx.globalAlpha=0.85;
+    ctx.beginPath();
+    for (let x=0; x<W; x++) {
+      const y = H-(data[x]||0)/100*H;
+      x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha=1;
+    const y2 = H-(data[W-1]||0)/100*H;
+    ctx.fillStyle=c; ctx.beginPath(); ctx.arc(W-1, y2, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+}
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+// 按钮
+document.querySelectorAll('.btn').forEach(b=>{
+  b.onclick = () => {
+    document.querySelectorAll('.btn').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    mode.name = b.dataset.mode;
+  };
+});
+
+initHist();
+setInterval(()=>{ step(); draw(document.getElementById('cv-up'),'up'); draw(document.getElementById('cv-down'),'down');
+                  draw(document.getElementById('cv-cpu'),'cpu'); draw(document.getElementById('cv-mem'),'mem'); }, 120);
+</script>
+</body>
+</html>

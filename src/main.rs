@@ -21,7 +21,11 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::UI::HiDpi::*;
 
-const WINDOW_W: i32 = 177;
+// Window width is runtime: 285 with trend graphs, 177 compact without
+// (toggled via the context menu's 显示图表 item).
+const WINDOW_W_GRAPH: i32 = 285;
+const WINDOW_W_COMPACT: i32 = 177;
+static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 
 // Window height is platform-dependent: Win11 taskbar ≈48px → 42; Win10
 // classic taskbar ≈40px → 36. Set once at startup (see detect_taskbar_type).
@@ -31,11 +35,12 @@ static mut WINDOW_H: i32 = 42;
 const ROW_LEFT: i32 = 3;
 const ARROW_RIGHT: i32 = 24;
 const SPEED_LEFT: i32 = 26;
-const SPEED_RIGHT: i32 = 94;
-const DIVIDER_X: i32 = 98;
-const STATUS_LEFT: i32 = 106;
-const STATUS_LABEL_RIGHT: i32 = 134;
-const STATUS_RIGHT: i32 = 173;
+// Network trend graph, immediately right of the speed number.
+const GRAPH_UP_LEFT: i32 = 90;
+const GRAPH_UP_RIGHT: i32 = 138;
+// CPU/memory trend graph, immediately right of the percentage value.
+const GRAPH_CPU_LEFT: i32 = 219;
+const GRAPH_CPU_RIGHT: i32 = 281;
 // Color tokens — Dark theme (system dark taskbar)
 const DARK_BG: COLORREF = COLORREF(0x00302C2C);
 const DARK_DIVIDER: COLORREF = COLORREF(0x00606060);
@@ -62,9 +67,27 @@ static mut DOWN: f64 = 0.0;
 static mut UP: f64 = 0.0;
 static mut CPU_USAGE: f32 = 0.0;
 static mut MEMORY_USAGE: f32 = 0.0;
+// Adaptive peak for the speed graph (network speed has no fixed 0-100% scale).
+// Decays slowly so the curve stays visible at low activity.
+static mut MAX_DOWN: f64 = 1024.0;
+static mut MAX_UP: f64 = 1024.0;
+// History buffers for the scrolling trend graph (TrafficMonitor style:
+// TASKBAR_GRAPH_STEP=5 → every 5 polls the accumulated average is written,
+// then the curve scrolls one column). Values are 0-100 percent.
+const GRAPH_STEP: usize = 5;
+const GRAPH_LEN: usize = 128;
+static mut HIST_DOWN: [u8; GRAPH_LEN] = [0; GRAPH_LEN];
+static mut HIST_UP: [u8; GRAPH_LEN] = [0; GRAPH_LEN];
+static mut HIST_CPU: [u8; GRAPH_LEN] = [0; GRAPH_LEN];
+static mut HIST_MEM: [u8; GRAPH_LEN] = [0; GRAPH_LEN];
+static mut HIST_HEAD: usize = 0;
+static mut HIST_ACC: [f64; 4] = [0.0; 4]; // down/up/cpu/mem accumulators
+static mut HIST_COUNT: usize = 0;
 static mut LIGHT_THEME: bool = false;
 static mut EMBEDDED: bool = false;
 static mut MENU_OPEN: bool = false;
+// Whether the scrolling trend graphs are drawn (toggle via context menu).
+static mut SHOW_GRAPHS: bool = true;
 static mut DIRTY: bool = true;
 // True = Win11 XAML taskbar (parent Shell_TrayWnd, anchor TrayNotifyWnd);
 // False = Win10 classic taskbar (parent ReBarWindow32, anchor start button).
@@ -260,17 +283,31 @@ impl D2DRenderer {
                 let row_left = ROW_LEFT as f32;
                 let arrow_right = ARROW_RIGHT as f32;
                 let speed_left = SPEED_LEFT as f32;
-                let speed_right = SPEED_RIGHT as f32;
-                let divider_x = DIVIDER_X as f32;
-                let status_left = STATUS_LEFT as f32;
-                let status_label_right = STATUS_LABEL_RIGHT as f32;
-                let status_right = STATUS_RIGHT as f32;
-                // Layout scales with the actual window height (Win11 42px /
-                // Win10 36px): two rows split the height, small top margin.
+                // Layout adapts to graph toggle: with graphs the window is
+                // wide (285) and each value has a graph beside it; without
+                // graphs it is compact (177) and values sit next to the
+                // divider like the original layout.
+                let (speed_right, divider_x, status_left, status_label_right, status_right,
+                     graph_up_left, graph_up_w, graph_cpu_left, graph_cpu_w) =
+                    if SHOW_GRAPHS {
+                        (88.0, 142.0, 146.0, 175.0, 215.0,
+                         GRAPH_UP_LEFT as f32, (GRAPH_UP_RIGHT - GRAPH_UP_LEFT) as f32,
+                         GRAPH_CPU_LEFT as f32, (GRAPH_CPU_RIGHT - GRAPH_CPU_LEFT) as f32)
+                    } else {
+                        (94.0, 98.0, 106.0, 134.0, 173.0,
+                         0.0, 0.0, 0.0, 0.0)
+                    };
+                // Layout: two rows fill the window; text vertically centered
+                // per row. Each value has its own trend graph immediately to
+                // its right: row1 = [↑speed][up graph] | [CPU][cpu graph],
+                // row2 = [↓speed][down graph] | [MEM][mem graph].
                 let h2 = h / 2.0;
                 let row_h = h2 - 3.0;         // per-row height
                 let up_top = 2.0;              // top margin
                 let down_top = h2 + 1.0;       // second row
+                let graph_half = h2 - 3.0;     // each row's graph band height
+                let graph_top1 = 2.0;          // row1 band
+                let graph_top2 = h2 + 1.0;     // row2 band
                 // Arrow glyph is 20px tall; the row is ~16px. Give the arrow
                 // layout rect extra height so it is never clipped (clipping is
                 // what made the arrow look "sometimes big, sometimes small").
@@ -351,6 +388,91 @@ impl D2DRenderer {
                         &D2D_RECT_F { left: status_label_right, top: down_top, right: status_right, bottom: down_top + row_h },
                         mb, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL,
                     );
+                }
+
+                // ── Trend graph with gradient fill (user-chosen style):
+                // build a closed path from the bottom-left up over the curve
+                // points and back to the bottom-right, fill it with a
+                // vertical gradient (curve color at top → transparent at
+                // bottom), then stroke the curve itself on top.
+                let draw_graph = |hist: &[u8; GRAPH_LEN], color: COLORREF, gx: f32, gw: f32, gy: f32, gh: f32| {
+                    let head = HIST_HEAD;
+                    let cols = (gw as usize).min(GRAPH_LEN);
+                    if cols < 2 { return; }
+                    // Curve points (newest at right edge, scrolling left).
+                    let pts: Vec<D2D_POINT_2F> = (0..cols)
+                        .map(|i| {
+                            let v = hist[(head + GRAPH_LEN - 1 - i) % GRAPH_LEN] as f32;
+                            let x = gx + (cols - 1 - i) as f32;
+                            let y = gy + gh - v * gh / 100.0;
+                            D2D_POINT_2F { x, y }
+                        })
+                        .collect();
+                    // Closed path: bottom-left → curve → bottom-right.
+                    let path = self.d2d_factory.CreatePathGeometry().ok();
+                    if let Some(geom) = path.as_ref() {
+                        if let Ok(sink) = geom.Open() {
+                            sink.BeginFigure(D2D_POINT_2F { x: pts[0].x, y: gy + gh }, D2D1_FIGURE_BEGIN_FILLED);
+                            for p in pts.iter() { sink.AddLine(*p); }
+                            sink.AddLine(D2D_POINT_2F { x: pts[cols-1].x, y: gy + gh });
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                            // Vertical gradient: color (alpha .55) → transparent.
+                            let stops = [
+                                D2D1_GRADIENT_STOP { position: 0.0, color: d2d_color(color, 0.55) },
+                                D2D1_GRADIENT_STOP { position: 1.0, color: d2d_color(color, 0.0) },
+                            ];
+                            let col = self.ctx.CreateGradientStopCollection(
+                                &stops,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                                D2D1_EXTEND_MODE_CLAMP,
+                                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                            ).ok();
+                            let g: windows::core::Result<ID2D1Geometry> = geom.cast();
+                            if let Ok(g) = g {
+                                if let Some(col) = col.as_ref() {
+                                    let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                        startPoint: D2D_POINT_2F { x: gx, y: gy },
+                                        endPoint: D2D_POINT_2F { x: gx, y: gy + gh },
+                                        ..Default::default()
+                                    };
+                                    let brush = self.ctx.CreateLinearGradientBrush(&props, None, col).ok();
+                                    if let Some(brush) = brush.as_ref() {
+                                        self.ctx.FillGeometry(&g, brush, None);
+                                    }
+                                } else {
+                                    // Gradient unavailable → translucent solid fill.
+                                    if let Some(sb) = self.ctx.CreateSolidColorBrush(&d2d_color(color, 0.4), None).ok().as_ref() {
+                                        self.ctx.FillGeometry(&g, sb, None);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Stroke the curve itself.
+                    if let Some(gb) = self.ctx.CreateSolidColorBrush(&d2d_color(color, 1.0), None).ok().as_ref() {
+                        let line = self.d2d_factory.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES1 {
+                            startCap: D2D1_CAP_STYLE_ROUND,
+                            endCap: D2D1_CAP_STYLE_ROUND,
+                            lineJoin: D2D1_LINE_JOIN_ROUND,
+                            ..Default::default()
+                        }, None).ok();
+                        if let Some(line) = line.as_ref() {
+                            for wnd in pts.windows(2) {
+                                self.ctx.DrawLine(wnd[0], wnd[1], gb, 1.0, line);
+                            }
+                        }
+                    }
+                };
+                if SHOW_GRAPHS {
+                    // Row 1: upload graph (left) + CPU graph (right).
+                    draw_graph(&HIST_UP, up_color, graph_up_left, graph_up_w, graph_top1, graph_half);
+                    draw_graph(&HIST_CPU, cpu_color, graph_cpu_left, graph_cpu_w, graph_top1, graph_half);
+                    // Row 2: download graph (left) + memory graph (right).
+                    draw_graph(&HIST_DOWN, down_color, graph_up_left, graph_up_w, graph_top2, graph_half);
+                    draw_graph(&HIST_MEM, mem_color, graph_cpu_left, graph_cpu_w, graph_top2, graph_half);
                 }
             }
 
@@ -525,12 +647,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         WM_COMMAND => {
-            // Commands from the popup menu (ID 1 = 开机自启, ID 2 = 退出).
+            // Commands from the popup menu (ID 1 = 开机自启, ID 2 = 退出,
+            // ID 3 = 显示图表).
             let id = (wp.0 as u32) & 0xFFFF;
             if id == 1 {
                 if is_autostart() { clear_autostart(); } else { ensure_autostart(); }
             } else if id == 2 {
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            } else if id == 3 {
+                unsafe {
+                    SHOW_GRAPHS = !SHOW_GRAPHS;
+                    WINDOW_W = if SHOW_GRAPHS { WINDOW_W_GRAPH } else { WINDOW_W_COMPACT };
+                    // Recreate the D2D pipeline for the new width, resize the
+                    // window and reposition it (compact mode drops the graph
+                    // columns; wide mode restores them).
+                    RENDERER = None;
+                    RENDERER = D2DRenderer::new(hwnd, WINDOW_W as u32, WINDOW_H as u32);
+                    if let Some(r) = RENDERER.as_mut() { r.render(); }
+                    reposition(hwnd);
+                    DIRTY = true;
+                }
             }
             LRESULT(0)
         }
@@ -659,6 +795,8 @@ unsafe fn detect_taskbar_type() {
         let mut tbr = RECT::default();
         if GetWindowRect(tb, &mut tbr).is_ok() {
             let h = tbr.bottom - tbr.top;
+            // Values and trend graph are side-by-side now, so keep the window
+            // compact (Win11 42px / Win10 36px).
             WINDOW_H = if win11 { (h - 6).min(42) } else { (h - 4).min(36) };
             if WINDOW_H < 20 { WINDOW_H = 20; }
         }
@@ -1043,6 +1181,8 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let autostart_on = is_autostart();
     let flags = if autostart_on { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
     let _ = AppendMenuW(menu, flags, 1, windows::core::w!("开机自启"));
+    let gflags = if SHOW_GRAPHS { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+    let _ = AppendMenuW(menu, gflags, 3, windows::core::w!("显示图表"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, 2, windows::core::w!("退出"));
 
@@ -1053,6 +1193,19 @@ unsafe fn show_context_menu(hwnd: HWND) {
     // Our window is WS_POPUP (top-level style) even while parented to
     // Shell_TrayWnd, so SetForegroundWindow works.
     let _ = SetForegroundWindow(hwnd);
+    // Auto-close after 6s (user request): a background thread sends ESC to
+    // the popup menu's window, which makes TrackPopupMenu's modal loop exit
+    // (same as the user pressing Esc). Guarded by MENU_OPEN so a menu that
+    // was already closed by a click isn't touched.
+    std::thread::spawn(|| unsafe {
+        std::thread::sleep(Duration::from_secs(6));
+        if MENU_OPEN {
+            let m = FindWindowW(windows::core::w!("#32768"), None);
+            if m.0 != 0 {
+                let _ = PostMessageW(m, WM_KEYDOWN, WPARAM(0x1B), LPARAM(0)); // VK_ESCAPE
+            }
+        }
+    });
     // TrafficMonitor 原样：TPM_LEFTALIGN | TPM_RIGHTBUTTON，无 TPM_RETURNCMD
     //（命令经 WM_COMMAND 回传）。
     let cmd = TrackPopupMenu(
@@ -1133,6 +1286,15 @@ fn net_thread() {
                 unsafe {
                     changed |= (nd - DOWN).abs() >= 0.15 || (nu - UP).abs() >= 0.15;
                     DOWN = nd; UP = nu;
+                    // Adaptive bar peak: EMA up fast, decay slowly down.
+                    // A hard jump (max) makes the bar hug zero right after a
+                    // burst; EMA keeps the scale responsive.
+                    let up_f = 0.3f64;   // fast attack
+                    let decay = 0.995f64;
+                    MAX_DOWN = if nd > MAX_DOWN { MAX_DOWN * (1.0 - up_f) + nd * up_f } else { MAX_DOWN * decay };
+                    MAX_UP = if nu > MAX_UP { MAX_UP * (1.0 - up_f) + nu * up_f } else { MAX_UP * decay };
+                    if MAX_DOWN < 1024.0 { MAX_DOWN = 1024.0; }
+                    if MAX_UP < 1024.0 { MAX_UP = 1024.0; }
                 }
             } else {
                 // Chosen interface vanished (NIC unplugged, VPN dropped):
@@ -1158,6 +1320,30 @@ fn net_thread() {
             CPU_USAGE = cpu_usage;
             MEMORY_USAGE = memory_usage;
             if changed { DIRTY = true; }
+        }
+
+        // Trend graph accumulation with noise reduction (TrafficMonitor
+        // TASKBAR_GRAPH_STEP): average GRAPH_STEP polls into one column so
+        // the curve ignores single-poll spikes. Percent values: network
+        // normalized against the adaptive peak, CPU/mem against 100.
+        unsafe {
+            let down_pct = (DOWN / MAX_DOWN.max(1.0) * 100.0).clamp(0.0, 100.0);
+            let up_pct = (UP / MAX_UP.max(1.0) * 100.0).clamp(0.0, 100.0);
+            HIST_ACC[0] += down_pct;
+            HIST_ACC[1] += up_pct;
+            HIST_ACC[2] += cpu_usage as f64;
+            HIST_ACC[3] += memory_usage as f64;
+            HIST_COUNT += 1;
+            if HIST_COUNT >= GRAPH_STEP {
+                let idx = HIST_HEAD % GRAPH_LEN;
+                HIST_DOWN[idx] = (HIST_ACC[0] / GRAPH_STEP as f64) as u8;
+                HIST_UP[idx] = (HIST_ACC[1] / GRAPH_STEP as f64) as u8;
+                HIST_CPU[idx] = (HIST_ACC[2] / GRAPH_STEP as f64) as u8;
+                HIST_MEM[idx] = (HIST_ACC[3] / GRAPH_STEP as f64) as u8;
+                HIST_HEAD += 1;
+                HIST_ACC = [0.0; 4];
+                HIST_COUNT = 0;
+            }
         }
     }
 }
