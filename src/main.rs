@@ -21,10 +21,12 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::UI::HiDpi::*;
 
-// Window width is runtime: 285 with trend graphs, 177 compact without
-// (toggled via the context menu's 显示图表 item).
-const WINDOW_W_GRAPH: i32 = 285;
-const WINDOW_W_COMPACT: i32 = 177;
+// Window width is runtime: 347 with trend graphs, 219 compact without
+// (toggled via the context menu's 显示图表 item). The left 42px hold the
+// latency dot + value; everything right of x=53 is the ORIGINAL layout
+// shifted wholesale (no column is stretched or squeezed).
+const WINDOW_W_GRAPH: i32 = 347;
+const WINDOW_W_COMPACT: i32 = 219;
 static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 
 // Window height is platform-dependent: Win11 taskbar ≈48px → 42; Win10
@@ -32,15 +34,21 @@ static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 static mut WINDOW_H: i32 = 42;
 
 // Compact two-row layout tokens (physical px at 96 DPI)
-const ROW_LEFT: i32 = 3;
-const ARROW_RIGHT: i32 = 24;
-const SPEED_LEFT: i32 = 26;
+const ROW_LEFT: i32 = 53;
+const ARROW_RIGHT: i32 = 66;
+const SPEED_LEFT: i32 = 68;
+// Latency status dot + value, left edge of the window (dot 6px + "23ms").
+// Text zone is wide so the value never collides with the arrow column.
+const DOT_X: f32 = 2.0;
+const DOT_D: f32 = 6.0;
+const LAT_TEXT_LEFT: f32 = 8.0;
+const LAT_TEXT_RIGHT: f32 = 50.0;
 // Network trend graph, immediately right of the speed number.
-const GRAPH_UP_LEFT: i32 = 90;
-const GRAPH_UP_RIGHT: i32 = 138;
+const GRAPH_UP_LEFT: i32 = 132;
+const GRAPH_UP_RIGHT: i32 = 180;
 // CPU/memory trend graph, immediately right of the percentage value.
-const GRAPH_CPU_LEFT: i32 = 219;
-const GRAPH_CPU_RIGHT: i32 = 281;
+const GRAPH_CPU_LEFT: i32 = 261;
+const GRAPH_CPU_RIGHT: i32 = 323;
 // Color tokens — Dark theme (system dark taskbar)
 const DARK_BG: COLORREF = COLORREF(0x00302C2C);
 const DARK_DIVIDER: COLORREF = COLORREF(0x00606060);
@@ -88,6 +96,9 @@ static mut EMBEDDED: bool = false;
 static mut MENU_OPEN: bool = false;
 // Whether the scrolling trend graphs are drawn (toggle via context menu).
 static mut SHOW_GRAPHS: bool = true;
+// Network latency detection (toggle via context menu). LATENCY_MS: -1 = fail.
+static mut NET_DETECT: bool = true;
+static mut LATENCY_MS: i32 = -1;
 static mut DIRTY: bool = true;
 // True = Win11 XAML taskbar (parent Shell_TrayWnd, anchor TrayNotifyWnd);
 // False = Win10 classic taskbar (parent ReBarWindow32, anchor start button).
@@ -104,6 +115,8 @@ static mut RENDERER: Option<D2DRenderer> = None;
 static mut FORMAT_LEFT: Option<IDWriteTextFormat> = None;
 static mut FORMAT_RIGHT: Option<IDWriteTextFormat> = None;
 static mut FORMAT_ARROW: Option<IDWriteTextFormat> = None;
+// 12px right-aligned format for ≥1000ms latency values ("1234ms").
+static mut FORMAT_SMALL: Option<IDWriteTextFormat> = None;
 
 // ─── D2D + DirectComposition renderer (TrafficMonitor Win11 path) ──
 //
@@ -279,6 +292,9 @@ impl D2DRenderer {
             if FORMAT_ARROW.is_none() {
                 FORMAT_ARROW = create_text_format(&"Segoe UI".encode_utf16().collect::<Vec<_>>(), 20.0, DWRITE_TEXT_ALIGNMENT_LEADING);
             }
+            if FORMAT_SMALL.is_none() {
+                FORMAT_SMALL = create_text_format(&"Segoe UI".encode_utf16().collect::<Vec<_>>(), 12.0, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
             if let (Some(f), Some(rf), Some(af)) = (FORMAT_LEFT.as_ref(), FORMAT_RIGHT.as_ref(), FORMAT_ARROW.as_ref()) {
                 let row_left = ROW_LEFT as f32;
                 let arrow_right = ARROW_RIGHT as f32;
@@ -290,11 +306,11 @@ impl D2DRenderer {
                 let (speed_right, divider_x, status_left, status_label_right, status_right,
                      graph_up_left, graph_up_w, graph_cpu_left, graph_cpu_w) =
                     if SHOW_GRAPHS {
-                        (88.0, 142.0, 146.0, 175.0, 215.0,
+                        (130.0, 184.0, 188.0, 217.0, 257.0,
                          GRAPH_UP_LEFT as f32, (GRAPH_UP_RIGHT - GRAPH_UP_LEFT) as f32,
                          GRAPH_CPU_LEFT as f32, (GRAPH_CPU_RIGHT - GRAPH_CPU_LEFT) as f32)
                     } else {
-                        (94.0, 98.0, 106.0, 134.0, 173.0,
+                        (136.0, 140.0, 148.0, 174.0, 215.0,
                          0.0, 0.0, 0.0, 0.0)
                     };
                 // Layout: two rows fill the window; text vertically centered
@@ -328,6 +344,65 @@ impl D2DRenderer {
                         &D2D_RECT_F { left: row_left, top: down_top - 2.0, right: arrow_right, bottom: down_top - 2.0 + arrow_h },
                         db, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL,
                     );
+                }
+
+                // Latency status dot (left edge, one per row): green <50ms,
+                // yellow 50-150ms, red >150ms or unreachable. Hidden when the
+                // detection toggle is off.
+                if NET_DETECT {
+                    let dot_color = if LATENCY_MS < 0 {
+                        COLORREF(0x00E05A5A) // red: unreachable
+                    } else if LATENCY_MS < 50 {
+                        COLORREF(0x0058A858) // green
+                    } else if LATENCY_MS < 150 {
+                        COLORREF(0x00D8B838) // yellow
+                    } else {
+                        COLORREF(0x00E05A5A) // red: high latency
+                    };
+                    if let Some(dotb) = self.ctx.CreateSolidColorBrush(&d2d_color(dot_color, 1.0), None).ok().as_ref() {
+                        // Single latency indicator, vertically centered on the
+                        // whole window (both rows share the same network path,
+                        // so one value is enough).
+                        let dot_cy = h / 2.0;
+                        self.ctx.FillEllipse(
+                            &D2D1_ELLIPSE {
+                                point: D2D_POINT_2F { x: DOT_X + DOT_D / 2.0, y: dot_cy },
+                                radiusX: DOT_D / 2.0,
+                                radiusY: DOT_D / 2.0,
+                            },
+                            dotb,
+                        );
+                        // Latency value text right of the dot. Unit always
+                        // shown; ≥1000ms switches to a smaller 12px format so
+                        // "1234ms" fits without touching the arrow column.
+                        // Right-aligned so short values hug the right edge.
+                        let lat_text = if LATENCY_MS < 0 {
+                            "--".to_string()
+                        } else {
+                            format!("{}ms", LATENCY_MS)
+                        };
+                        let lat_utf: Vec<u16> = lat_text.encode_utf16().collect();
+                        let lat_fmt = if LATENCY_MS >= 1000 {
+                            FORMAT_SMALL.as_ref()
+                        } else {
+                            Some(rf)
+                        };
+                        if let Some(lat_fmt) = lat_fmt {
+                            self.ctx.DrawText(
+                                &lat_utf,
+                                lat_fmt,
+                                &D2D_RECT_F {
+                                    left: LAT_TEXT_LEFT,
+                                    top: up_top,
+                                    right: LAT_TEXT_RIGHT,
+                                    bottom: h - up_top,
+                                },
+                                dotb,
+                                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                                DWRITE_MEASURING_MODE_NATURAL,
+                            );
+                        }
+                    }
                 }
 
                 // Speeds (right-aligned so long values grow left, never into
@@ -663,8 +738,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     // columns; wide mode restores them).
                     RENDERER = None;
                     RENDERER = D2DRenderer::new(hwnd, WINDOW_W as u32, WINDOW_H as u32);
-                    if let Some(r) = RENDERER.as_mut() { r.render(); }
+                    if let Some(r) = RENDERER.as_mut() {
+                        r.render();
+                    }
                     reposition(hwnd);
+                    DIRTY = true;
+                }
+            } else if id == 4 {
+                unsafe {
+                    NET_DETECT = !NET_DETECT;
+                    if !NET_DETECT { LATENCY_MS = -1; }
                     DIRTY = true;
                 }
             }
@@ -1183,6 +1266,8 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, flags, 1, windows::core::w!("开机自启"));
     let gflags = if SHOW_GRAPHS { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
     let _ = AppendMenuW(menu, gflags, 3, windows::core::w!("显示图表"));
+    let nflags = if NET_DETECT { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+    let _ = AppendMenuW(menu, nflags, 4, windows::core::w!("网络延迟检测"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, 2, windows::core::w!("退出"));
 
@@ -1220,6 +1305,53 @@ unsafe fn show_context_menu(hwnd: HWND) {
 }
 
 // ─── Network polling thread ────────────────────────────────────
+
+/// Ping the target (Ali DNS 223.5.5.5) every 2s via IcmpSendEcho and update
+/// LATENCY_MS (-1 = unreachable). Runs only while NET_DETECT is enabled.
+fn latency_thread() {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+    std::thread::spawn(|| unsafe {
+        let h = match IcmpCreateFile() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        // 223.5.5.5 in network byte order (u32 little-endian memory layout).
+        let target: u32 = u32::from_le_bytes([223, 5, 5, 5]);
+        loop {
+            if NET_DETECT {
+                let mut reply = [0u8; 64]; // ICMP_ECHO_REPLY sized buffer
+                let sent = IcmpSendEcho(
+                    h,
+                    target,
+                    std::ptr::null(),
+                    0,
+                    None,
+                    reply.as_mut_ptr() as *mut core::ffi::c_void,
+                    reply.len() as u32,
+                    2000, // timeout ms
+                );
+                if sent > 0 {
+                    // ICMP_ECHO_REPLY (x64 layout):
+                    //   [0-3] Address, [4-7] Status (0=IP_SUCCESS),
+                    //   [8-11] RoundTripTime (ms)
+                    let status = u32::from_ne_bytes([reply[4], reply[5], reply[6], reply[7]]);
+                    if status == 0 {
+                        let rtt = u32::from_ne_bytes([reply[8], reply[9], reply[10], reply[11]]);
+                        LATENCY_MS = rtt as i32;
+                    } else {
+                        LATENCY_MS = -1;
+                    }
+                } else {
+                    LATENCY_MS = -1;
+                }
+                DIRTY = true;
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        // NOTE: handle intentionally leaked — this thread never exits; the
+        // OS reclaims the handle on process exit.
+    });
+}
 
 fn net_thread() {
     use sysinfo::{Networks, System};
@@ -1375,6 +1507,8 @@ fn main() {
     }
     // Net thread
     std::thread::spawn(net_thread);
+    // Latency detection thread (pings; only updates when NET_DETECT on)
+    latency_thread();
 
     // Autostart by default
     ensure_autostart();
