@@ -659,8 +659,12 @@ fn system_light_theme() -> bool {
 /// "渐变温度计"配色：速度 → 颜色，log 尺度从青蓝→绿→黄→橙红平滑过渡。
 /// 0 速度由调用方保留 idle 灰；速度越高色温越暖。深浅主题各一套锚点。
 fn speed_color(speed: f64) -> COLORREF {
-    let light = unsafe { LIGHT_THEME };
-    // 色带锚点 (R,G,B)：青蓝 → 绿 → 黄 → 橙红
+    speed_color_for(speed, unsafe { LIGHT_THEME })
+}
+
+/// speed_color with an explicit theme — the hover panel sits on a WHITE card
+/// regardless of the system theme, so it must use the light (deep) anchors.
+fn speed_color_for(speed: f64, light: bool) -> COLORREF {
     let bands: [(u8, u8, u8); 4] = if light {
         [(40, 120, 190), (40, 150, 90), (190, 150, 50), (210, 80, 50)]
     } else {
@@ -976,13 +980,13 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             let mem = CreateCompatibleDC(hdc);
             let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
             let old = SelectObject(mem, bmp);
-            // Panel background: dark rounded card.
-            let bg = CreateSolidBrush(COLORREF(0x0026262B));
+            // Panel background: white card (user requested light theme).
+            let bg = CreateSolidBrush(COLORREF(0x00F5F5F5));
             FillRect(mem, &rc, bg);
             let _ = DeleteObject(bg);
             // Card border (subtle). FrameRect strokes only — Rectangle()
             // would FILL the interior with the border brush, wiping the bg.
-            let border = CreateSolidBrush(COLORREF(0x00404048));
+            let border = CreateSolidBrush(COLORREF(0x00D8D8D8));
             let _ = FrameRect(mem, &rc, border);
             let _ = DeleteObject(border);
 
@@ -1004,15 +1008,15 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
                 windows::core::w!("Segoe UI"),
             );
             let old_font = SelectObject(mem, f);
-            let light = unsafe { LIGHT_THEME };
-            let text_col = if light { COLORREF(0x00222222) } else { COLORREF(0x00E8E8E8) };
-            let dim_col = if light { COLORREF(0x00505050) } else { COLORREF(0x00989898) };
+            // Panel is a white card: dark text regardless of system theme.
+            let text_col = COLORREF(0x00202020);
+            let dim_col = COLORREF(0x00808080);
 
             let (down, up) = (unsafe { DOWN }, unsafe { UP });
             let (dv, du) = fmt_speed(down);
             let (uv, uu) = fmt_speed(up);
-            let down_col = if down > 0.0 { speed_color(down) } else { dim_col };
-            let up_col = if up > 0.0 { speed_color(up) } else { dim_col };
+            let down_col = if down > 0.0 { speed_color_for(down, true) } else { dim_col };
+            let up_col = if up > 0.0 { speed_color_for(up, true) } else { dim_col };
             let cpu = unsafe { CPU_USAGE };
             let mem_usage = unsafe { MEMORY_USAGE };
             let lat = unsafe { LATENCY_MS };
