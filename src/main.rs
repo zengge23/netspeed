@@ -25,8 +25,8 @@ use windows::Win32::UI::HiDpi::*;
 // (toggled via the context menu's 显示图表 item). The left 42px hold the
 // latency dot + value; everything right of x=53 is the ORIGINAL layout
 // shifted wholesale (no column is stretched or squeezed).
-const WINDOW_W_GRAPH: i32 = 347;
-const WINDOW_W_COMPACT: i32 = 219;
+const WINDOW_W_GRAPH: i32 = 367;
+const WINDOW_W_COMPACT: i32 = 239;
 static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 
 // Window height is platform-dependent: Win11 taskbar ≈48px → 42; Win10
@@ -34,21 +34,28 @@ static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 static mut WINDOW_H: i32 = 42;
 
 // Compact two-row layout tokens (physical px at 96 DPI)
-const ROW_LEFT: i32 = 53;
-const ARROW_RIGHT: i32 = 66;
-const SPEED_LEFT: i32 = 68;
-// Latency status dot + value, left edge of the window (dot 6px + "23ms").
-// Text zone is wide so the value never collides with the arrow column.
-const DOT_X: f32 = 2.0;
-const DOT_D: f32 = 6.0;
-const LAT_TEXT_LEFT: f32 = 8.0;
-const LAT_TEXT_RIGHT: f32 = 50.0;
+const ROW_LEFT: i32 = 73;
+const ARROW_RIGHT: i32 = 86;
+const SPEED_LEFT: i32 = 88;
+// Latency status dot + mood emoji + value, left edge of the window.
+// Dot 6px, mood emoji 16px wide, value text right-aligned; the text zone
+// is wide enough that "1234ms" never collides with the arrow column.
+// Latency mood emoji + value, left edge of the window. No status dot —
+// the mood emoji itself carries the color cue. Value text right-aligned;
+// the text zone is wide enough that "1234ms" never collides with the
+// arrow column.
+const LAT_TEXT_LEFT: f32 = 32.0;
+const LAT_TEXT_RIGHT: f32 = 70.0;
+// Mood emoji column: big glyph (28px, window-height limit) leading the
+// latency value.
+const EMOJI_LEFT: f32 = 2.0;
+const EMOJI_RIGHT: f32 = 30.0;
 // Network trend graph, immediately right of the speed number.
-const GRAPH_UP_LEFT: i32 = 132;
-const GRAPH_UP_RIGHT: i32 = 180;
+const GRAPH_UP_LEFT: i32 = 152;
+const GRAPH_UP_RIGHT: i32 = 200;
 // CPU/memory trend graph, immediately right of the percentage value.
-const GRAPH_CPU_LEFT: i32 = 261;
-const GRAPH_CPU_RIGHT: i32 = 323;
+const GRAPH_CPU_LEFT: i32 = 281;
+const GRAPH_CPU_RIGHT: i32 = 343;
 // Color tokens — Dark theme (system dark taskbar)
 const DARK_BG: COLORREF = COLORREF(0x00302C2C);
 const DARK_DIVIDER: COLORREF = COLORREF(0x00606060);
@@ -121,6 +128,8 @@ static mut FORMAT_RIGHT: Option<IDWriteTextFormat> = None;
 static mut FORMAT_ARROW: Option<IDWriteTextFormat> = None;
 // 12px right-aligned format for ≥1000ms latency values ("1234ms").
 static mut FORMAT_SMALL: Option<IDWriteTextFormat> = None;
+// Mood emoji (Segoe UI Emoji, 16px) — rendered with ENABLE_COLOR_FONT.
+static mut FORMAT_EMOJI: Option<IDWriteTextFormat> = None;
 
 // ─── D2D + DirectComposition renderer (TrafficMonitor Win11 path) ──
 //
@@ -299,22 +308,24 @@ impl D2DRenderer {
             if FORMAT_SMALL.is_none() {
                 FORMAT_SMALL = create_text_format(&"Segoe UI".encode_utf16().collect::<Vec<_>>(), 12.0, DWRITE_TEXT_ALIGNMENT_TRAILING);
             }
+            if FORMAT_EMOJI.is_none() {
+                FORMAT_EMOJI = create_text_format(&"Segoe UI Emoji".encode_utf16().collect::<Vec<_>>(), 28.0, DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
             if let (Some(f), Some(rf), Some(af)) = (FORMAT_LEFT.as_ref(), FORMAT_RIGHT.as_ref(), FORMAT_ARROW.as_ref()) {
                 let row_left = ROW_LEFT as f32;
                 let arrow_right = ARROW_RIGHT as f32;
                 let speed_left = SPEED_LEFT as f32;
                 // Layout adapts to graph toggle: with graphs the window is
-                // wide (285) and each value has a graph beside it; without
-                // graphs it is compact (177) and values sit next to the
-                // divider like the original layout.
+                // wide and each value has a graph beside it; without graphs
+                // it is compact and values sit next to the divider.
                 let (speed_right, divider_x, status_left, status_label_right, status_right,
                      graph_up_left, graph_up_w, graph_cpu_left, graph_cpu_w) =
                     if SHOW_GRAPHS {
-                        (130.0, 184.0, 188.0, 217.0, 257.0,
+                        (150.0, 204.0, 208.0, 237.0, 277.0,
                          GRAPH_UP_LEFT as f32, (GRAPH_UP_RIGHT - GRAPH_UP_LEFT) as f32,
                          GRAPH_CPU_LEFT as f32, (GRAPH_CPU_RIGHT - GRAPH_CPU_LEFT) as f32)
                     } else {
-                        (136.0, 140.0, 148.0, 174.0, 215.0,
+                        (156.0, 160.0, 168.0, 194.0, 235.0,
                          0.0, 0.0, 0.0, 0.0)
                     };
                 // Layout: two rows fill the window; text vertically centered
@@ -367,15 +378,30 @@ impl D2DRenderer {
                         // Single latency indicator, vertically centered on the
                         // whole window (both rows share the same network path,
                         // so one value is enough).
-                        let dot_cy = h / 2.0;
-                        self.ctx.FillEllipse(
-                            &D2D1_ELLIPSE {
-                                point: D2D_POINT_2F { x: DOT_X + DOT_D / 2.0, y: dot_cy },
-                                radiusX: DOT_D / 2.0,
-                                radiusY: DOT_D / 2.0,
-                            },
-                            dotb,
-                        );
+                        // Mood emoji ("网络心情") leading the latency value:
+                        // 😄 flying / 🙂 smooth / 😐 middling / 😫 struggling.
+                        // Big glyph (22px) — the emoji itself is the status
+                        // indicator (no separate dot). Rendered with
+                        // ENABLE_COLOR_FONT so Segoe UI Emoji draws in full
+                        // color; falls back to monochrome on drivers without
+                        // color-font support.
+                        if let Some(ef) = FORMAT_EMOJI.as_ref() {
+                            let mood = net_mood();
+                            let mood_utf: Vec<u16> = mood.encode_utf16().collect();
+                            self.ctx.DrawText(
+                                &mood_utf,
+                                ef,
+                                &D2D_RECT_F {
+                                    left: EMOJI_LEFT,
+                                    top: h / 2.0 - 14.0,
+                                    right: EMOJI_RIGHT,
+                                    bottom: h / 2.0 + 14.0,
+                                },
+                                dotb,
+                                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                                DWRITE_MEASURING_MODE_NATURAL,
+                            );
+                        }
                         // Latency value text right of the dot. Unit always
                         // shown; ≥1000ms switches to a smaller 12px format so
                         // "1234ms" fits without touching the arrow column.
@@ -622,6 +648,27 @@ fn fmt_speed(s: f64) -> (String, String) {
     else if s < 1048576.0 { (format!("{:.1}", s / 1024.0), "K/s".to_string()) }
     else if s < 1073741824.0 { (format!("{:.1}", s / 1048576.0), "M/s".to_string()) }
     else { (format!("{:.1}", s / 1073741824.0), "G/s".to_string()) }
+}
+
+/// "网络心情" — a quick mood read of the network, driven by latency and
+/// current throughput: 😄 flying (low latency + fast), 🙂 smooth,
+/// 😐 middling, 😫 struggling/unreachable.
+fn net_mood() -> &'static str {
+    unsafe {
+        let lat = LATENCY_MS;
+        let speed = DOWN.max(UP);
+        if lat < 0 {
+            "😫"
+        } else if lat < 50 && speed > 1048576.0 {
+            "😄"
+        } else if lat < 50 {
+            "🙂"
+        } else if lat < 150 {
+            "😐"
+        } else {
+            "😫"
+        }
+    }
 }
 
 fn read_cpu_usage(previous: &mut Option<(u64, u64, u64)>) -> f32 {
@@ -1358,7 +1405,7 @@ fn save_config() {
     let Some(p) = config_path() else { return };
     let s = format!("show_graphs={}\nnet_detect={}\nautostart={}\n",
         unsafe { SHOW_GRAPHS as u8 }, unsafe { NET_DETECT as u8 },
-        unsafe { is_autostart() as u8 });
+        is_autostart() as u8);
     let _ = std::fs::write(p, s);
 }
 
