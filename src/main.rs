@@ -51,8 +51,8 @@ const LAT_TEXT_LEFT: f32 = 32.0;
 const LAT_TEXT_RIGHT: f32 = 76.0;
 // Mood emoji column: big glyph (28px, window-height limit) leading the
 // latency value.
-const EMOJI_LEFT: f32 = 2.0;
-const EMOJI_RIGHT: f32 = 30.0;
+const EMOJI_LEFT: f32 = 0.0;
+const EMOJI_RIGHT: f32 = 28.0;
 // Network trend graph, immediately right of the speed number.
 const GRAPH_UP_LEFT: i32 = 158;
 const GRAPH_UP_RIGHT: i32 = 206;
