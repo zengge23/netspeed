@@ -29,7 +29,7 @@ use windows::Win32::UI::HiDpi::*;
 // latency dot + value; everything right of x=53 is the ORIGINAL layout
 // shifted wholesale (no column is stretched or squeezed).
 const WINDOW_W_GRAPH: i32 = 367;
-const WINDOW_W_COMPACT: i32 = 239;
+const WINDOW_W_COMPACT: i32 = 245;
 static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 
 // Window height is platform-dependent: Win11 taskbar ≈48px → 42; Win10
@@ -37,9 +37,9 @@ static mut WINDOW_W: i32 = WINDOW_W_GRAPH;
 static mut WINDOW_H: i32 = 42;
 
 // Compact two-row layout tokens (physical px at 96 DPI)
-const ROW_LEFT: i32 = 73;
-const ARROW_RIGHT: i32 = 86;
-const SPEED_LEFT: i32 = 88;
+const ROW_LEFT: i32 = 79;
+const ARROW_RIGHT: i32 = 92;
+const SPEED_LEFT: i32 = 94;
 // Latency status dot + mood emoji + value, left edge of the window.
 // Dot 6px, mood emoji 16px wide, value text right-aligned; the text zone
 // is wide enough that "1234ms" never collides with the arrow column.
@@ -48,17 +48,17 @@ const SPEED_LEFT: i32 = 88;
 // the text zone is wide enough that "1234ms" never collides with the
 // arrow column.
 const LAT_TEXT_LEFT: f32 = 32.0;
-const LAT_TEXT_RIGHT: f32 = 70.0;
+const LAT_TEXT_RIGHT: f32 = 76.0;
 // Mood emoji column: big glyph (28px, window-height limit) leading the
 // latency value.
 const EMOJI_LEFT: f32 = 2.0;
 const EMOJI_RIGHT: f32 = 30.0;
 // Network trend graph, immediately right of the speed number.
-const GRAPH_UP_LEFT: i32 = 152;
-const GRAPH_UP_RIGHT: i32 = 200;
+const GRAPH_UP_LEFT: i32 = 158;
+const GRAPH_UP_RIGHT: i32 = 206;
 // CPU/memory trend graph, immediately right of the percentage value.
-const GRAPH_CPU_LEFT: i32 = 281;
-const GRAPH_CPU_RIGHT: i32 = 343;
+const GRAPH_CPU_LEFT: i32 = 287;
+const GRAPH_CPU_RIGHT: i32 = 349;
 // Color tokens — Dark theme (system dark taskbar)
 const DARK_BG: COLORREF = COLORREF(0x00302C2C);
 const DARK_DIVIDER: COLORREF = COLORREF(0x00606060);
@@ -349,11 +349,11 @@ impl D2DRenderer {
                 let (speed_right, divider_x, status_left, status_label_right, status_right,
                      graph_up_left, graph_up_w, graph_cpu_left, graph_cpu_w) =
                     if SHOW_GRAPHS {
-                        (150.0, 204.0, 208.0, 237.0, 277.0,
+                        (156.0, 210.0, 214.0, 243.0, 283.0,
                          GRAPH_UP_LEFT as f32, (GRAPH_UP_RIGHT - GRAPH_UP_LEFT) as f32,
                          GRAPH_CPU_LEFT as f32, (GRAPH_CPU_RIGHT - GRAPH_CPU_LEFT) as f32)
                     } else {
-                        (156.0, 160.0, 168.0, 194.0, 235.0,
+                        (162.0, 166.0, 174.0, 200.0, 241.0,
                          0.0, 0.0, 0.0, 0.0)
                     };
                 // Layout: two rows fill the window; text vertically centered
