@@ -19,6 +19,7 @@ use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct3D10::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::DirectComposition::*;
+use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::UI::HiDpi::*;
@@ -925,11 +926,12 @@ fn show_panel(owner: HWND) {
         }
         let x = wr.left + (wr.right - wr.left - PANEL_W) / 2;
         let y = wr.top - PANEL_H - 6;
-        // ShowWindow(SW_SHOWNOACTIVATE) is what actually makes this popup
-        // visible: SWP_SHOWWINDOW alone returned success yet left the window
-        // hidden (observed on Win11 25H2), and ShowWindow is also what the
-        // detail-panel verification harness relies on.
-        let _ = ShowWindow(PANEL_HWND, SW_SHOWNOACTIVATE);
+        // Win11 card feel: subtle 100ms fade-in (AW_BLEND). AnimateWindow
+        // itself reveals the window from the hidden state; calling it AFTER
+        // ShowWindow was observed to leave the panel invisible, so the order
+        // is AnimateWindow first, then reposition (position is unaffected by
+        // the animation, and SWP_SHOWWINDOW alone was unreliable here).
+        let _ = AnimateWindow(PANEL_HWND, 100, AW_BLEND);
         SetWindowPos(
             PANEL_HWND,
             HWND_TOPMOST,
@@ -980,13 +982,14 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             let mem = CreateCompatibleDC(hdc);
             let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
             let old = SelectObject(mem, bmp);
-            // Panel background: white card (user requested light theme).
-            let bg = CreateSolidBrush(COLORREF(0x00F5F5F5));
+            // Panel background: Win11 Mica light card (user wants the panel
+            // to match Windows 11's look; #F3F3F3 is the light Mica surface).
+            let bg = CreateSolidBrush(COLORREF(0x00F3F3F3));
             FillRect(mem, &rc, bg);
             let _ = DeleteObject(bg);
             // Card border (subtle). FrameRect strokes only — Rectangle()
             // would FILL the interior with the border brush, wiping the bg.
-            let border = CreateSolidBrush(COLORREF(0x00D8D8D8));
+            let border = CreateSolidBrush(COLORREF(0x00E0E0E0));
             let _ = FrameRect(mem, &rc, border);
             let _ = DeleteObject(border);
 
@@ -1005,7 +1008,7 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
                 CLIP_DEFAULT_PRECIS.0 as u32,
                 CLEARTYPE_QUALITY.0 as u32,
                 DEFAULT_PITCH.0 as u32,
-                windows::core::w!("Segoe UI"),
+                windows::core::w!("Segoe UI Variable"),
             );
             let old_font = SelectObject(mem, f);
             // Panel is a white card: dark text regardless of system theme.
@@ -1147,6 +1150,17 @@ fn create_panel_window() {
         PANEL_HWND = hwnd;
         if hwnd.0 != 0 {
             let _ = ShowWindow(hwnd, SW_HIDE);
+            // Win11 look: rounded corners + DWM drop shadow. Corner
+            // preference applies to top-level windows regardless of frame;
+            // ROUND gives the modern 8px-radius card look and DWM supplies
+            // the matching shadow automatically.
+            let corner: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
         }
     }
 }
