@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use windows::core::Interface;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Threading::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -744,12 +744,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     reposition(hwnd);
                     DIRTY = true;
                 }
+                save_config();
             } else if id == 4 {
                 unsafe {
                     NET_DETECT = !NET_DETECT;
                     if !NET_DETECT { LATENCY_MS = -1; }
                     DIRTY = true;
                 }
+                save_config();
             }
             LRESULT(0)
         }
@@ -1304,6 +1306,41 @@ unsafe fn show_context_menu(hwnd: HWND) {
     unsafe { MENU_OPEN = false; }
 }
 
+// ─── Persisted toggles (netspeed.ini next to the exe) ─────────
+// SHOW_GRAPHS and NET_DETECT survive restarts. The file is tiny and only
+// written when a toggle changes, so IO cost is negligible.
+
+fn config_path() -> Option<std::path::PathBuf> {
+    unsafe {
+        let mut buf = [0u16; 1024];
+        let n = GetModuleFileNameW(GetModuleHandleW(None).unwrap(), &mut buf);
+        if n == 0 || n >= buf.len() as u32 { return None; }
+        let mut p = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n as usize]));
+        p.set_extension("ini");
+        Some(p)
+    }
+}
+
+fn load_config() {
+    let Some(p) = config_path() else { return };
+    let Ok(s) = std::fs::read_to_string(&p) else { return };
+    for line in s.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("show_graphs=") {
+            unsafe { SHOW_GRAPHS = v == "1"; }
+        } else if let Some(v) = line.strip_prefix("net_detect=") {
+            unsafe { NET_DETECT = v == "1"; }
+        }
+    }
+}
+
+fn save_config() {
+    let Some(p) = config_path() else { return };
+    let s = format!("show_graphs={}\nnet_detect={}\n",
+        unsafe { SHOW_GRAPHS as u8 }, unsafe { NET_DETECT as u8 });
+    let _ = std::fs::write(p, s);
+}
+
 // ─── Network polling thread ────────────────────────────────────
 
 /// Ping the target (Ali DNS 223.5.5.5) every 2s via IcmpSendEcho and update
@@ -1493,6 +1530,10 @@ fn main() {
     // Detect taskbar type (Win11 XAML vs Win10 classic) → sets TASKBAR_WIN11
     // and WINDOW_H before the window is created.
     unsafe { detect_taskbar_type(); }
+
+    // Restore persisted toggles (显示图表 / 网络延迟检测) before the window
+    // is created, so WINDOW_W matches SHOW_GRAPHS from the start.
+    load_config();
 
     // Single instance: bail out if another instance already holds the mutex.
     unsafe {
