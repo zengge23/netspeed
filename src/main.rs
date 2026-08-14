@@ -10,6 +10,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::System::Registry::*;
+use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -130,6 +132,18 @@ static mut FORMAT_ARROW: Option<IDWriteTextFormat> = None;
 static mut FORMAT_SMALL: Option<IDWriteTextFormat> = None;
 // Mood emoji (Segoe UI Emoji, 16px) — rendered with ENABLE_COLOR_FONT.
 static mut FORMAT_EMOJI: Option<IDWriteTextFormat> = None;
+// ─── Hover detail panel ──────────────────────────────────────
+// Second topmost popup shown while the mouse is over the taskbar window:
+// current speeds, latency + mood, CPU/mem, NIC name, today's totals.
+static mut PANEL_HWND: HWND = HWND(0);
+static mut PANEL_VISIBLE: bool = false;
+static mut PANEL_TRACKING: bool = false; // TrackMouseEvent armed
+static mut IFACE_NAME: String = String::new(); // active NIC (from net thread)
+static mut TODAY_DOWN: f64 = 0.0;  // bytes received today
+static mut TODAY_UP: f64 = 0.0;    // bytes sent today
+static mut TODAY_DATE: i32 = -1;   // yyyymmdd the counters were last reset on
+const PANEL_W: i32 = 220;
+const PANEL_H: i32 = 128;
 
 // ─── D2D + DirectComposition renderer (TrafficMonitor Win11 path) ──
 //
@@ -275,7 +289,7 @@ impl D2DRenderer {
             // ghosting — grayscale AA composites cleanly over the taskbar.
             self.ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-            let (_, div, down_a, up_a, idle, unit, warn) = if LIGHT_THEME {
+            let (_, div, _, _, idle, unit, warn) = if LIGHT_THEME {
                 (LIGHT_BG, LIGHT_DIVIDER, LIGHT_DOWN, LIGHT_UP, LIGHT_IDLE, LIGHT_UNIT, LIGHT_WARNING)
             } else {
                 (DARK_BG, DARK_DIVIDER, DARK_DOWN, DARK_UP, DARK_IDLE, DARK_UNIT, DARK_WARNING)
@@ -292,8 +306,8 @@ impl D2DRenderer {
             let (down, up, cpu_usage, memory_usage) = (DOWN, UP, CPU_USAGE, MEMORY_USAGE);
             let (down_val, down_unit) = fmt_speed(down);
             let (up_val, up_unit) = fmt_speed(up);
-            let down_color = if down > 0.0 { down_a } else { idle };
-            let up_color = if up > 0.0 { up_a } else { idle };
+            let down_color = if down > 0.0 { speed_color(down) } else { idle };
+            let up_color = if up > 0.0 { speed_color(up) } else { idle };
 
             // Cached text formats (created once; see static FORMAT_*).
             if FORMAT_LEFT.is_none() {
@@ -642,6 +656,27 @@ fn system_light_theme() -> bool {
 
 // ─── Speed formatting ──────────────────────────────────────────
 
+/// "渐变温度计"配色：速度 → 颜色，log 尺度从青蓝→绿→黄→橙红平滑过渡。
+/// 0 速度由调用方保留 idle 灰；速度越高色温越暖。深浅主题各一套锚点。
+fn speed_color(speed: f64) -> COLORREF {
+    let light = unsafe { LIGHT_THEME };
+    // 色带锚点 (R,G,B)：青蓝 → 绿 → 黄 → 橙红
+    let bands: [(u8, u8, u8); 4] = if light {
+        [(40, 120, 190), (40, 150, 90), (190, 150, 50), (210, 80, 50)]
+    } else {
+        [(120, 210, 255), (120, 235, 160), (240, 210, 100), (255, 130, 90)]
+    };
+    // log10: 100 B/s≈2.0 → 100 MB/s≈8.0
+    let t = ((speed.max(1.0).log10() - 2.0) / 6.0).clamp(0.0, 1.0);
+    let seg = t * 3.0;
+    let i = (seg as usize).min(2);
+    let f = seg - i as f64;
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * f).round() as u8;
+    let (r1, g1, b1) = bands[i];
+    let (r2, g2, b2) = bands[i + 1];
+    COLORREF(((lerp(b1, b2) as u32) << 16) | ((lerp(g1, g2) as u32) << 8) | lerp(r1, r2) as u32)
+}
+
 fn fmt_speed(s: f64) -> (String, String) {
     // Unified format: always 1 decimal so digits look consistent across units
     if s < 1024.0 { (format!("{:.1}", s), "B/s".to_string()) }
@@ -696,6 +731,10 @@ fn read_cpu_usage(previous: &mut Option<(u64, u64, u64)>) -> f32 {
 
 // ─── Window procedure ─────────────────────────────────────────
 
+// WM_MOUSELEAVE is defined in the Win32_UI_Controls module in windows 0.57
+// (not WindowsAndMessaging); we don't need the whole Controls feature just
+// for one message id, so define it locally.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_CREATE => {
@@ -724,6 +763,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     renderer.render();
                 }
                 unsafe { DIRTY = false; }
+            }
+            // Refresh the hover panel while it is visible (values move).
+            if unsafe { PANEL_VISIBLE } {
+                let _ = InvalidateRect(unsafe { PANEL_HWND }, None, true);
             }
             LRESULT(0)
         }
@@ -762,6 +805,27 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_RBUTTONUP => {
             show_context_menu(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            // Arm mouse-leave tracking once per entry, then show the detail
+            // panel above the taskbar window.
+            if !unsafe { PANEL_TRACKING } {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+                unsafe { PANEL_TRACKING = true; }
+            }
+            show_panel(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            unsafe { PANEL_TRACKING = false; }
+            hide_panel();
             LRESULT(0)
         }
         // WM_CONTEXTMENU is the "official" context-menu message; keep it in
@@ -835,6 +899,251 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ─── Hover detail panel ───────────────────────────────────────
+// A second topmost popup shown while the mouse is over the taskbar window.
+// It renders with plain GDI (it is NOT embedded in the taskbar, so the
+// DComposition constraint does not apply) and shows speeds, latency/mood,
+// CPU/mem, the active NIC and today's traffic totals.
+const PANEL_CLASS: windows::core::PCWSTR = windows::core::w!("NetSpeedPanelWnd");
+
+fn show_panel(owner: HWND) {
+    unsafe {
+        if PANEL_HWND.0 == 0 || PANEL_VISIBLE {
+            return;
+        }
+        // Position: centered above the owner window, just above the taskbar.
+        let mut wr = RECT::default();
+        if GetWindowRect(owner, &mut wr).is_err() {
+            return;
+        }
+        let x = wr.left + (wr.right - wr.left - PANEL_W) / 2;
+        let y = wr.top - PANEL_H - 6;
+        // ShowWindow(SW_SHOWNOACTIVATE) is what actually makes this popup
+        // visible: SWP_SHOWWINDOW alone returned success yet left the window
+        // hidden (observed on Win11 25H2), and ShowWindow is also what the
+        // detail-panel verification harness relies on.
+        let _ = ShowWindow(PANEL_HWND, SW_SHOWNOACTIVATE);
+        SetWindowPos(
+            PANEL_HWND,
+            HWND_TOPMOST,
+            x,
+            y,
+            PANEL_W,
+            PANEL_H,
+            SWP_NOACTIVATE,
+        )
+        .ok();
+        // Force a fresh paint (values may have changed while hidden).
+        let _ = InvalidateRect(PANEL_HWND, None, true);
+        PANEL_VISIBLE = true;
+    }
+}
+
+fn hide_panel() {
+    unsafe {
+        if PANEL_HWND.0 == 0 || !PANEL_VISIBLE {
+            return;
+        }
+        let _ = ShowWindow(PANEL_HWND, SW_HIDE);
+        PANEL_VISIBLE = false;
+    }
+}
+
+/// Format an absolute byte count (used by the panel for today's totals).
+fn fmt_bytes(b: f64) -> String {
+    if b >= 1073741824.0 {
+        format!("{:.2}G", b / 1073741824.0)
+    } else if b >= 1048576.0 {
+        format!("{:.1}M", b / 1048576.0)
+    } else if b >= 1024.0 {
+        format!("{:.0}K", b / 1024.0)
+    } else {
+        format!("{:.0}B", b)
+    }
+}
+
+unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            // Double-buffer to avoid flicker.
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let mem = CreateCompatibleDC(hdc);
+            let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            let old = SelectObject(mem, bmp);
+            // Panel background: dark rounded card.
+            let bg = CreateSolidBrush(COLORREF(0x0026262B));
+            FillRect(mem, &rc, bg);
+            let _ = DeleteObject(bg);
+            // Card border (subtle). FrameRect strokes only — Rectangle()
+            // would FILL the interior with the border brush, wiping the bg.
+            let border = CreateSolidBrush(COLORREF(0x00404048));
+            let _ = FrameRect(mem, &rc, border);
+            let _ = DeleteObject(border);
+
+            // Text formatting: Segoe UI 13px; values in white-ish.
+            let f = CreateFontW(
+                -15,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                CLEARTYPE_QUALITY.0 as u32,
+                DEFAULT_PITCH.0 as u32,
+                windows::core::w!("Segoe UI"),
+            );
+            let old_font = SelectObject(mem, f);
+            let light = unsafe { LIGHT_THEME };
+            let text_col = if light { COLORREF(0x00222222) } else { COLORREF(0x00E8E8E8) };
+            let dim_col = if light { COLORREF(0x00505050) } else { COLORREF(0x00989898) };
+
+            let (down, up) = (unsafe { DOWN }, unsafe { UP });
+            let (dv, du) = fmt_speed(down);
+            let (uv, uu) = fmt_speed(up);
+            let down_col = if down > 0.0 { speed_color(down) } else { dim_col };
+            let up_col = if up > 0.0 { speed_color(up) } else { dim_col };
+            let cpu = unsafe { CPU_USAGE };
+            let mem_usage = unsafe { MEMORY_USAGE };
+            let lat = unsafe { LATENCY_MS };
+            let mood = net_mood();
+            let iface = unsafe { IFACE_NAME.clone() };
+            let t_down = fmt_bytes(unsafe { TODAY_DOWN });
+            let t_up = fmt_bytes(unsafe { TODAY_UP });
+
+            // Line helper: label (dim) + value (colored/white).
+            let line = |y: i32, label: &str, value: &str, value_col: COLORREF| {
+                let _ = SetTextColor(mem, dim_col);
+                let _ = SetBkMode(mem, TRANSPARENT);
+                let lw: Vec<u16> = label.encode_utf16().collect();
+                let _ = TextOutW(mem, 10, y, &lw);
+                let _ = SetTextColor(mem, value_col);
+                let vw: Vec<u16> = value.encode_utf16().collect();
+                let _ = TextOutW(mem, 74, y, &vw);
+            };
+
+            // Row 1: speeds.
+            let _ = SetTextColor(mem, dim_col);
+            let _ = SetBkMode(mem, TRANSPARENT);
+            let lab: Vec<u16> = "下载".encode_utf16().collect();
+            let _ = TextOutW(mem, 10, 8, &lab);
+            let _ = SetTextColor(mem, down_col);
+            let txt = format!("{} {}", dv.trim(), du);
+            let vw: Vec<u16> = txt.encode_utf16().collect();
+            let _ = TextOutW(mem, 74, 8, &vw);
+
+            let _ = SetTextColor(mem, dim_col);
+            let lab: Vec<u16> = "上传".encode_utf16().collect();
+            let _ = TextOutW(mem, 10, 28, &lab);
+            let _ = SetTextColor(mem, up_col);
+            let txt = format!("{} {}", uv.trim(), uu);
+            let vw: Vec<u16> = txt.encode_utf16().collect();
+            let _ = TextOutW(mem, 74, 28, &vw);
+
+            // Row 2: latency + mood.
+            let lat_txt = if unsafe { NET_DETECT } {
+                if lat < 0 {
+                    "检测失败".to_string()
+                } else {
+                    format!("{}ms", lat)
+                }
+            } else {
+                "已关闭".to_string()
+            };
+            line(50, "延迟", &lat_txt, text_col);
+            let _ = SetTextColor(mem, dim_col);
+            let lab: Vec<u16> = "心情".encode_utf16().collect();
+            let _ = TextOutW(mem, 146, 50, &lab);
+            let _ = SetTextColor(mem, text_col);
+            let mw: Vec<u16> = mood.encode_utf16().collect();
+            let _ = TextOutW(mem, 200, 50, &mw);
+
+            // Row 3: CPU + memory.
+            line(70, "CPU", &format!("{:.0}%", cpu), text_col);
+            let _ = SetTextColor(mem, dim_col);
+            let lab: Vec<u16> = "内存".encode_utf16().collect();
+            let _ = TextOutW(mem, 146, 70, &lab);
+            let _ = SetTextColor(mem, text_col);
+            let txt = format!("{:.0}%", mem_usage);
+            let vw: Vec<u16> = txt.encode_utf16().collect();
+            let _ = TextOutW(mem, 200, 70, &vw);
+
+            // Row 4: NIC.
+            line(90, "网卡", &iface, text_col);
+
+            // Row 5: today's totals.
+            let _ = SetTextColor(mem, dim_col);
+            let lab: Vec<u16> = "今日".encode_utf16().collect();
+            let _ = TextOutW(mem, 10, 106, &lab);
+            let _ = SetTextColor(mem, text_col);
+            let txt = format!("↓{}  ↑{}", t_down, t_up);
+            let vw: Vec<u16> = txt.encode_utf16().collect();
+            let _ = TextOutW(mem, 74, 106, &vw);
+
+            SelectObject(mem, old_font);
+            let _ = DeleteObject(f);
+            let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            let _ = DeleteObject(bmp);
+            let _ = DeleteDC(mem);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+/// Register + create the hidden detail panel window. Call once from main.
+fn create_panel_window() {
+    unsafe {
+        let wc = WNDCLASSW {
+            style: WNDCLASS_STYLES(0),
+            lpfnWndProc: Some(panel_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: GetModuleHandleW(None).unwrap().into(),
+            hIcon: HICON::default(),
+            hCursor: HCURSOR::default(),
+            hbrBackground: HBRUSH::default(),
+            lpszMenuName: windows::core::PCWSTR::null(),
+            lpszClassName: PANEL_CLASS,
+        };
+        if RegisterClassW(&wc) == 0 {
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+            if err != 1410 {
+                // 1410 = ERROR_CLASS_ALREADY_EXISTS — fine on re-register.
+                return;
+            }
+        }
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            PANEL_CLASS,
+            windows::core::w!("NetSpeed Panel"),
+            WS_POPUP,
+            0,
+            0,
+            PANEL_W,
+            PANEL_H,
+            None,
+            None,
+            GetModuleHandleW(None).unwrap(),
+            None,
+        );
+        PANEL_HWND = hwnd;
+        if hwnd.0 != 0 {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
     }
 }
 
@@ -1523,6 +1832,18 @@ fn net_thread() {
                 unsafe {
                     changed |= (nd - DOWN).abs() >= 0.15 || (nu - UP).abs() >= 0.15;
                     DOWN = nd; UP = nu;
+                    // Today's traffic totals (bytes), reset at local midnight.
+                    // Used by the hover detail panel.
+                    IFACE_NAME = iface.clone();
+                    let st = GetLocalTime();
+                    let ymd = (st.wYear as i32) * 10000 + (st.wMonth as i32) * 100 + st.wDay as i32;
+                    if TODAY_DATE != ymd {
+                        TODAY_DATE = ymd;
+                        TODAY_DOWN = 0.0;
+                        TODAY_UP = 0.0;
+                    }
+                    TODAY_DOWN += nd * el;
+                    TODAY_UP += nu * el;
                     // Adaptive bar peak: EMA up fast, decay slowly down.
                     // A hard jump (max) makes the bar hug zero right after a
                     // burst; EMA keeps the scale responsive.
@@ -1652,6 +1973,9 @@ fn main() {
     };
 
     if hwnd.0 == 0 { return; }
+
+    // Hover detail panel (hidden until the mouse enters the taskbar window).
+    create_panel_window();
 
     unsafe {
         reposition(hwnd);
