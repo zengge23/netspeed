@@ -99,6 +99,10 @@ static mut SHOW_GRAPHS: bool = true;
 // Network latency detection (toggle via context menu). LATENCY_MS: -1 = fail.
 static mut NET_DETECT: bool = true;
 static mut LATENCY_MS: i32 = -1;
+// Autostart remembered in netspeed.ini. The registry Run key is the source
+// of truth, but in restricted environments (no HKCU write access) the write
+// silently fails, so the last user choice is kept here as a fallback.
+static mut AUTOSTART_INI: bool = false;
 static mut DIRTY: bool = true;
 // True = Win11 XAML taskbar (parent Shell_TrayWnd, anchor TrayNotifyWnd);
 // False = Win10 classic taskbar (parent ReBarWindow32, anchor start button).
@@ -726,7 +730,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // ID 3 = 显示图表).
             let id = (wp.0 as u32) & 0xFFFF;
             if id == 1 {
-                if is_autostart() { clear_autostart(); } else { ensure_autostart(); }
+                if is_autostart() {
+                    clear_autostart();
+                    // Keep the ini mirror in sync: if we only clear the
+                    // registry, is_autostart() would still see the old
+                    // AUTOSTART_INI and the toggle could never turn off.
+                    unsafe { AUTOSTART_INI = false; }
+                } else {
+                    ensure_autostart();
+                    unsafe { AUTOSTART_INI = true; }
+                }
+                // Remember the choice in netspeed.ini too, so the checked
+                // state survives even where HKCU writes are blocked.
+                save_config();
             } else if id == 2 {
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             } else if id == 3 {
@@ -1222,7 +1238,9 @@ fn read_autostart() -> Option<String> {
 }
 
 fn is_autostart() -> bool {
-    read_autostart().is_some()
+    // Registry is the source of truth; fall back to the ini-remembered value
+    // when the registry read fails (restricted environments).
+    read_autostart().is_some() || unsafe { AUTOSTART_INI }
 }
 
 fn ensure_autostart() {
@@ -1330,14 +1348,17 @@ fn load_config() {
             unsafe { SHOW_GRAPHS = v == "1"; }
         } else if let Some(v) = line.strip_prefix("net_detect=") {
             unsafe { NET_DETECT = v == "1"; }
+        } else if let Some(v) = line.strip_prefix("autostart=") {
+            unsafe { AUTOSTART_INI = v == "1"; }
         }
     }
 }
 
 fn save_config() {
     let Some(p) = config_path() else { return };
-    let s = format!("show_graphs={}\nnet_detect={}\n",
-        unsafe { SHOW_GRAPHS as u8 }, unsafe { NET_DETECT as u8 });
+    let s = format!("show_graphs={}\nnet_detect={}\nautostart={}\n",
+        unsafe { SHOW_GRAPHS as u8 }, unsafe { NET_DETECT as u8 },
+        unsafe { is_autostart() as u8 });
     let _ = std::fs::write(p, s);
 }
 
