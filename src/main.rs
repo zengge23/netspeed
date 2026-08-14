@@ -143,7 +143,7 @@ static mut TODAY_DOWN: f64 = 0.0;  // bytes received today
 static mut TODAY_UP: f64 = 0.0;    // bytes sent today
 static mut TODAY_DATE: i32 = -1;   // yyyymmdd the counters were last reset on
 const PANEL_W: i32 = 220;
-const PANEL_H: i32 = 128;
+const PANEL_H: i32 = 142;
 
 // ─── D2D + DirectComposition renderer (TrafficMonitor Win11 path) ──
 //
@@ -1040,19 +1040,19 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             let _ = SetTextColor(mem, dim_col);
             let _ = SetBkMode(mem, TRANSPARENT);
             let lab: Vec<u16> = "下载".encode_utf16().collect();
-            let _ = TextOutW(mem, 10, 8, &lab);
+            let _ = TextOutW(mem, 10, 10, &lab);
             let _ = SetTextColor(mem, down_col);
             let txt = format!("{} {}", dv.trim(), du);
             let vw: Vec<u16> = txt.encode_utf16().collect();
-            let _ = TextOutW(mem, 74, 8, &vw);
+            let _ = TextOutW(mem, 74, 10, &vw);
 
             let _ = SetTextColor(mem, dim_col);
             let lab: Vec<u16> = "上传".encode_utf16().collect();
-            let _ = TextOutW(mem, 10, 28, &lab);
+            let _ = TextOutW(mem, 10, 32, &lab);
             let _ = SetTextColor(mem, up_col);
             let txt = format!("{} {}", uv.trim(), uu);
             let vw: Vec<u16> = txt.encode_utf16().collect();
-            let _ = TextOutW(mem, 74, 28, &vw);
+            let _ = TextOutW(mem, 74, 32, &vw);
 
             // Row 2: latency + mood.
             let lat_txt = if unsafe { NET_DETECT } {
@@ -1064,35 +1064,35 @@ unsafe extern "system" fn panel_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
             } else {
                 "已关闭".to_string()
             };
-            line(50, "延迟", &lat_txt, text_col);
+            line(54, "延迟", &lat_txt, text_col);
             let _ = SetTextColor(mem, dim_col);
             let lab: Vec<u16> = "心情".encode_utf16().collect();
-            let _ = TextOutW(mem, 146, 50, &lab);
+            let _ = TextOutW(mem, 146, 54, &lab);
             let _ = SetTextColor(mem, text_col);
             let mw: Vec<u16> = mood.encode_utf16().collect();
-            let _ = TextOutW(mem, 200, 50, &mw);
+            let _ = TextOutW(mem, 200, 54, &mw);
 
             // Row 3: CPU + memory.
-            line(70, "CPU", &format!("{:.0}%", cpu), text_col);
+            line(76, "CPU", &format!("{:.0}%", cpu), text_col);
             let _ = SetTextColor(mem, dim_col);
             let lab: Vec<u16> = "内存".encode_utf16().collect();
-            let _ = TextOutW(mem, 146, 70, &lab);
+            let _ = TextOutW(mem, 146, 76, &lab);
             let _ = SetTextColor(mem, text_col);
             let txt = format!("{:.0}%", mem_usage);
             let vw: Vec<u16> = txt.encode_utf16().collect();
-            let _ = TextOutW(mem, 200, 70, &vw);
+            let _ = TextOutW(mem, 200, 76, &vw);
 
             // Row 4: NIC.
-            line(90, "网卡", &iface, text_col);
+            line(98, "网卡", &iface, text_col);
 
             // Row 5: today's totals.
             let _ = SetTextColor(mem, dim_col);
             let lab: Vec<u16> = "今日".encode_utf16().collect();
-            let _ = TextOutW(mem, 10, 106, &lab);
+            let _ = TextOutW(mem, 10, 120, &lab);
             let _ = SetTextColor(mem, text_col);
             let txt = format!("↓{}  ↑{}", t_down, t_up);
             let vw: Vec<u16> = txt.encode_utf16().collect();
-            let _ = TextOutW(mem, 74, 106, &vw);
+            let _ = TextOutW(mem, 74, 120, &vw);
 
             SelectObject(mem, old_font);
             let _ = DeleteObject(f);
