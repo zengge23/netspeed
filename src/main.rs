@@ -114,6 +114,10 @@ static mut LATENCY_MS: i32 = -1;
 // silently fails, so the last user choice is kept here as a fallback.
 static mut AUTOSTART_INI: bool = false;
 static mut DIRTY: bool = true;
+// 渐变温度计配色（右键菜单切换；关 = 固定主题色 up/down）
+static mut GRADIENT_COLOR: bool = true;
+// 悬停详情面板（右键菜单切换）
+static mut SHOW_PANEL: bool = true;
 // True = Win11 XAML taskbar (parent Shell_TrayWnd, anchor TrayNotifyWnd);
 // False = Win10 classic taskbar (parent ReBarWindow32, anchor start button).
 static mut TASKBAR_WIN11: bool = true;
@@ -290,7 +294,7 @@ impl D2DRenderer {
             // ghosting — grayscale AA composites cleanly over the taskbar.
             self.ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-            let (_, div, _, _, idle, unit, warn) = if LIGHT_THEME {
+            let (_, div, down_a, up_a, idle, unit, warn) = if LIGHT_THEME {
                 (LIGHT_BG, LIGHT_DIVIDER, LIGHT_DOWN, LIGHT_UP, LIGHT_IDLE, LIGHT_UNIT, LIGHT_WARNING)
             } else {
                 (DARK_BG, DARK_DIVIDER, DARK_DOWN, DARK_UP, DARK_IDLE, DARK_UNIT, DARK_WARNING)
@@ -307,8 +311,17 @@ impl D2DRenderer {
             let (down, up, cpu_usage, memory_usage) = (DOWN, UP, CPU_USAGE, MEMORY_USAGE);
             let (down_val, down_unit) = fmt_speed(down);
             let (up_val, up_unit) = fmt_speed(up);
-            let down_color = if down > 0.0 { speed_color(down) } else { idle };
-            let up_color = if up > 0.0 { speed_color(up) } else { idle };
+            // 渐变温度计配色开关：开 = log 尺度色带（青蓝→橙红），关 = 固定主题色
+            let down_color = if down > 0.0 {
+                if GRADIENT_COLOR { speed_color(down) } else { down_a }
+            } else {
+                idle
+            };
+            let up_color = if up > 0.0 {
+                if GRADIENT_COLOR { speed_color(up) } else { up_a }
+            } else {
+                idle
+            };
 
             // Cached text formats (created once; see static FORMAT_*).
             if FORMAT_LEFT.is_none() {
@@ -884,6 +897,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     DIRTY = true;
                 }
                 save_config();
+            } else if id == 5 {
+                // 渐变温度计配色开关
+                unsafe {
+                    GRADIENT_COLOR = !GRADIENT_COLOR;
+                    DIRTY = true;
+                }
+                save_config();
+            } else if id == 6 {
+                // 悬停详情面板开关
+                unsafe {
+                    SHOW_PANEL = !SHOW_PANEL;
+                    if !SHOW_PANEL { hide_panel(); }
+                }
+                save_config();
             }
             LRESULT(0)
         }
@@ -916,7 +943,7 @@ const PANEL_CLASS: windows::core::PCWSTR = windows::core::w!("NetSpeedPanelWnd")
 
 fn show_panel(owner: HWND) {
     unsafe {
-        if PANEL_HWND.0 == 0 || PANEL_VISIBLE {
+        if !SHOW_PANEL || PANEL_HWND.0 == 0 || PANEL_VISIBLE {
             return;
         }
         // Position: centered above the owner window, just above the taskbar.
@@ -931,7 +958,12 @@ fn show_panel(owner: HWND) {
         // ShowWindow was observed to leave the panel invisible, so the order
         // is AnimateWindow first, then reposition (position is unaffected by
         // the animation, and SWP_SHOWWINDOW alone was unreliable here).
-        let _ = AnimateWindow(PANEL_HWND, 100, AW_BLEND);
+        // Fallback: AnimateWindow can fail (returns 0) on rapid show/hide
+        // cycles — then force ShowWindow so the panel still appears.
+        let animated = AnimateWindow(PANEL_HWND, 100, AW_BLEND);
+        if animated.is_err() {
+            let _ = ShowWindow(PANEL_HWND, SW_SHOWNOACTIVATE);
+        }
         SetWindowPos(
             PANEL_HWND,
             HWND_TOPMOST,
@@ -1662,6 +1694,10 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let _ = AppendMenuW(menu, gflags, 3, windows::core::w!("显示图表"));
     let nflags = if NET_DETECT { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
     let _ = AppendMenuW(menu, nflags, 4, windows::core::w!("网络延迟检测"));
+    let gflags2 = if GRADIENT_COLOR { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+    let _ = AppendMenuW(menu, gflags2, 5, windows::core::w!("渐变配色"));
+    let pflags = if SHOW_PANEL { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+    let _ = AppendMenuW(menu, pflags, 6, windows::core::w!("悬停详情面板"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, 2, windows::core::w!("退出"));
 
@@ -1724,15 +1760,24 @@ fn load_config() {
             unsafe { NET_DETECT = v == "1"; }
         } else if let Some(v) = line.strip_prefix("autostart=") {
             unsafe { AUTOSTART_INI = v == "1"; }
+        } else if let Some(v) = line.strip_prefix("gradient=") {
+            unsafe { GRADIENT_COLOR = v == "1"; }
+        } else if let Some(v) = line.strip_prefix("panel=") {
+            unsafe { SHOW_PANEL = v == "1"; }
         }
     }
 }
 
 fn save_config() {
     let Some(p) = config_path() else { return };
-    let s = format!("show_graphs={}\nnet_detect={}\nautostart={}\n",
-        unsafe { SHOW_GRAPHS as u8 }, unsafe { NET_DETECT as u8 },
-        is_autostart() as u8);
+    let s = format!(
+        "show_graphs={}\nnet_detect={}\nautostart={}\ngradient={}\npanel={}\n",
+        unsafe { SHOW_GRAPHS as u8 },
+        unsafe { NET_DETECT as u8 },
+        is_autostart() as u8,
+        unsafe { GRADIENT_COLOR as u8 },
+        unsafe { SHOW_PANEL as u8 },
+    );
     let _ = std::fs::write(p, s);
 }
 
