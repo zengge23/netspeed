@@ -873,6 +873,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 // state survives even where HKCU writes are blocked.
                 save_config();
             } else if id == 2 {
+                // User-initiated exit: kill the watchdog too, else it would
+                // immediately relaunch us.
+                unsafe { stop_watchdog(); }
                 let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             } else if id == 3 {
                 unsafe {
@@ -1373,9 +1376,11 @@ unsafe fn dump_taskbar_diag(tb: HWND, tbr: &RECT) {
 /// TrafficMonitor's taskbar dialog does exactly this (SetParent + popup).
 unsafe fn embed_into_taskbar(hwnd: HWND) -> bool {
     if unsafe { EMBEDDED } {
-        // Explorer may have restarted: re-parent if needed.
+        // Explorer may have restarted: re-parent if needed. Use GetAncestor:
+        // GetParent() returns 0 for WS_POPUP windows even when SetParent was
+        // used (this window deliberately keeps the popup style).
         let tb = FindWindowW(windows::core::w!("Shell_TrayWnd"), None);
-        if tb.0 != 0 && GetParent(hwnd) == tb {
+        if tb.0 != 0 && GetAncestor(hwnd, GA_PARENT) == tb {
             return true;
         }
         unsafe { EMBEDDED = false; }
@@ -1409,31 +1414,44 @@ unsafe fn reposition(hwnd: HWND) {
                 let mut tbr = RECT::default();
                 GetWindowRect(tb, &mut tbr).ok();
                 if tbr.right - tbr.left > 0 {
-                    match compute_target_pos(tb, &tbr) {
-                        Some((target_x, target_y)) => {
-                            if cr.left == target_x && cr.top == target_y
-                                && (cr.right - cr.left) == WINDOW_W
-                                && (cr.bottom - cr.top) == WINDOW_H
-                            {
-                                return; // in place — no calls beyond the check above
+                    // Explorer may have restarted (lock screen / crash /
+                    // update) — the taskbar HWND changes. If our window is
+                    // still parented to the OLD (now destroyed) taskbar we
+                    // are invisible forever despite the geometry matching:
+                    // the "in place" shortcut below would keep returning
+                    // without ever re-embedding. Verify the parent FIRST.
+                    // NOTE: GetParent() returns 0 for WS_POPUP windows even
+                    // when SetParent was used — must use GetAncestor
+                    // (GA_PARENT) which reports the real parent.
+                    if GetAncestor(hwnd, GA_PARENT) != tb {
+                        unsafe { EMBEDDED = false; }
+                    } else {
+                        match compute_target_pos(tb, &tbr) {
+                            Some((target_x, target_y)) => {
+                                if cr.left == target_x && cr.top == target_y
+                                    && (cr.right - cr.left) == WINDOW_W
+                                    && (cr.bottom - cr.top) == WINDOW_H
+                                {
+                                    return; // in place — no calls beyond the check above
+                                }
+                                // anchor ok but window is elsewhere → reposition
+                                // below (do NOT hold — a window stuck mid-taskbar
+                                // would otherwise never return to the tray side)
                             }
-                            // anchor ok but window is elsewhere → reposition
-                            // below (do NOT hold — a window stuck mid-taskbar
-                            // would otherwise never return to the tray side)
-                        }
-                        None => {
-                            // Anchor temporarily unreliable (taskbar re-layout).
-                            // Hold ONLY if we're already at the estimated tray
-                            // position (right edge - 280, TrafficMonitor's
-                            // tray+clock fallback). If we're anywhere else
-                            // (e.g. mid-taskbar after a reorder), fall through
-                            // and let the rescue move put us back.
-                            let est = tbr.right - WINDOW_W - 280;
-                            let close = (cr.left - est).abs() <= 40
-                                && (cr.right - cr.left) == WINDOW_W
-                                && (cr.bottom - cr.top) == WINDOW_H;
-                            if close { return; } // fine — hold
-                            unsafe { EMBEDDED = false; }
+                            None => {
+                                // Anchor temporarily unreliable (taskbar re-layout).
+                                // Hold ONLY if we're already at the estimated tray
+                                // position (right edge - 280, TrafficMonitor's
+                                // tray+clock fallback). If we're anywhere else
+                                // (e.g. mid-taskbar after a reorder), fall through
+                                // and let the rescue move put us back.
+                                let est = tbr.right - WINDOW_W - 280;
+                                let close = (cr.left - est).abs() <= 40
+                                    && (cr.right - cr.left) == WINDOW_W
+                                    && (cr.bottom - cr.top) == WINDOW_H;
+                                if close { return; } // fine — hold
+                                unsafe { EMBEDDED = false; }
+                            }
                         }
                     }
                 }
@@ -1971,7 +1989,169 @@ fn net_thread() {
 
 // ─── Main ──────────────────────────────────────────────────────
 
+/// Spawn our own watchdog process (netspeed.exe --watchdog) that relaunches
+/// this instance if it dies — e.g. after an Explorer crash on the lock
+/// screen, which previously left the taskbar widget gone until the user
+/// manually started it again. The watchdog is a child process in the same
+/// exe (single-file stays). It is NOT started from --watchdog itself.
+unsafe fn ensure_watchdog() {
+    use windows::Win32::System::Threading::*;
+    // Only one watchdog at a time. The WATCHDOG process owns
+    // "Local\NetSpeed_Watchdog" (it creates it, not us), so the probe here
+    // must be the inverse of the original design: if the mutex EXISTS we
+    // already have a watchdog — bail out. If it does NOT exist, the watchdog
+    // is not running — spawn one.
+    let h = OpenMutexW(MUTEX_ALL_ACCESS, false, windows::core::w!("Local\\NetSpeed_Watchdog"));
+    if h.is_ok() {
+        let _ = CloseHandle(h.unwrap());
+        return;
+    }
+    // Launch: netspeed.exe --watchdog, hidden window, same dir as exe.
+    // Use the STANDARD command-line format (space-separated, exe in quotes)
+    // — earlier NUL-joined args were parsed by CreateProcessW as a single
+    // token (NUL is not a separator), so the child never saw "--watchdog".
+    let mut exe = [0u16; 1024];
+    let _ = GetModuleFileNameW(None, &mut exe);
+    let path_len = exe.iter().take_while(|&&c| c != 0).count();
+    let mut cmd: Vec<u16> = Vec::with_capacity(path_len + 24);
+    cmd.push(b'"' as u16);
+    cmd.extend_from_slice(&exe[..path_len]);
+    cmd.push(b'"' as u16);
+    cmd.push(b' ' as u16);
+    cmd.extend_from_slice(&"--watchdog".encode_utf16().collect::<Vec<_>>());
+    cmd.push(0);
+    let mut si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut pi = PROCESS_INFORMATION::default();
+    let r = CreateProcessW(
+        None,
+        windows::core::PWSTR(cmd.as_mut_ptr()),
+        None,
+        None,
+        false,
+        CREATE_NO_WINDOW,
+        None,
+        None,
+        &mut si,
+        &mut pi,
+    );
+    if r.is_err() {
+        eprintln!("netspeed watchdog spawn failed: {:?}", r.err());
+    }
+}
+
+/// Signal the watchdog to exit (user chose 退出 in the menu). Without this
+/// the watchdog would relaunch us moments after we quit.
+unsafe fn stop_watchdog() {
+    use windows::Win32::System::Threading::*;
+    let ev = OpenEventW(
+        EVENT_MODIFY_STATE,
+        false,
+        windows::core::w!("Local\\NetSpeed_WatchdogStop"),
+    );
+    if let Ok(e) = ev {
+        let _ = SetEvent(e);
+        let _ = CloseHandle(e);
+    }
+}
+
+/// Watchdog entry: loop forever, checking every 2s whether the main
+/// netspeed instance is alive (its single-instance mutex is held). If the
+/// mutex becomes free the main process died — relaunch it (without the
+/// --watchdog flag) and keep watching.
+fn watchdog_main() {
+    unsafe {
+        use windows::Win32::System::Threading::*;
+        // This watchdog owns the "Local\NetSpeed_Watchdog" mutex — it is the
+        // single-watchdog marker ensure_watchdog() probes for. CreateMutexW
+        // with bInitialOwner=true: if another watchdog exists we get
+        // ERROR_ALREADY_EXISTS and exit (keep the handle alive otherwise).
+        let wd = CreateMutexW(None, true, windows::core::w!("Local\\NetSpeed_Watchdog"));
+        if wd.is_err() {
+            return;
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS.0 as i32) {
+            return;
+        }
+        let _wd = wd; // hold for process lifetime
+        // Stop event: the main instance sets this when the user explicitly
+        // exits, so we don't relaunch them.
+        let stop_ev = CreateEventW(
+            None,
+            true,
+            false,
+            windows::core::w!("Local\\NetSpeed_WatchdogStop"),
+        )
+        .unwrap_or_default();
+        // Manual-reset event: clear any stale "stop" state from a previous
+        // run, otherwise a prior 退出 would make us exit immediately.
+        if stop_ev.0 != 0 {
+            let _ = ResetEvent(stop_ev);
+        }
+        loop {
+            // User asked to stop?
+            if stop_ev.0 != 0
+                && WaitForSingleObject(stop_ev, 0) == WAIT_OBJECT_0
+            {
+                let _ = CloseHandle(stop_ev);
+                return;
+            }
+            // The main instance holds "Global\NetSpeed_SingleInstance" (same
+            // name the main() creates). If we can open it, the main process
+            // is alive.
+            let h = OpenMutexW(
+                MUTEX_ALL_ACCESS,
+                false,
+                windows::core::w!("Global\\NetSpeed_SingleInstance"),
+            );
+            if h.is_err() {
+                // Main instance is dead — relaunch it.
+                let mut exe = [0u16; 1024];
+                let _ = GetModuleFileNameW(None, &mut exe);
+                let path_len = exe.iter().take_while(|&&c| c != 0).count();
+                let mut cmd: Vec<u16> = Vec::with_capacity(path_len + 4);
+                cmd.push(b'"' as u16);
+                cmd.extend_from_slice(&exe[..path_len]);
+                cmd.push(b'"' as u16);
+                cmd.push(0);
+                let mut si = STARTUPINFOW {
+                    cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+                    ..Default::default()
+                };
+                let mut pi = PROCESS_INFORMATION::default();
+                let _ = CreateProcessW(
+                    None,
+                    windows::core::PWSTR(cmd.as_mut_ptr()),
+                    None,
+                    None,
+                    false,
+                    CREATE_NO_WINDOW,
+                    None,
+                    None,
+                    &mut si,
+                    &mut pi,
+                );
+            } else {
+                // Main alive — close our probe handle.
+                let _ = CloseHandle(h.unwrap());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+}
+
 fn main() {
+    // ── Watchdog mode ────────────────────────────────────────────────
+    // netspeed.exe --watchdog: monitors the main process and relaunches it
+    // if it dies (Explorer crash on lock-screen, crash, manual kill of the
+    // window process). The main instance spawns one of these on startup.
+    // Runs WITHOUT the single-instance mutex and without creating windows.
+    if std::env::args().any(|a| a == "--watchdog") {
+        watchdog_main();
+        return;
+    }
     // Per-monitor DPI awareness — prevents bitmap stretching (blurry "mosaic" text)
     // when the display scale is 125%/150%. Call before creating any window.
     unsafe { let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
@@ -1998,6 +2178,8 @@ fn main() {
         }
         let _ = h; // keep the handle alive for the process lifetime
     }
+    // Spawn the self-restart watchdog (one per main instance).
+    unsafe { ensure_watchdog(); }
     // Net thread
     std::thread::spawn(net_thread);
     // Latency detection thread (pings; only updates when NET_DETECT on)
