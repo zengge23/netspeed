@@ -2100,14 +2100,75 @@ fn watchdog_main() {
             }
             // The main instance holds "Global\NetSpeed_SingleInstance" (same
             // name the main() creates). If we can open it, the main process
-            // is alive.
-            let h = OpenMutexW(
+            // is alive. BUT: an Explorer crash destroys the taskbar (our
+            // parent), which destroys the main window while the PROCESS stays
+            // alive — the mutex remains held and the process looks healthy
+            // yet is a windowless zombie. So also verify the main window
+            // exists; if not, treat the main instance as dead and relaunch.
+            let mut main_alive = false;
+            if let Ok(h) = OpenMutexW(
                 MUTEX_ALL_ACCESS,
                 false,
                 windows::core::w!("Global\\NetSpeed_SingleInstance"),
-            );
-            if h.is_err() {
-                // Main instance is dead — relaunch it.
+            ) {
+                let _ = CloseHandle(h);
+                // Window present? FindWindowW scans top-level windows; our
+                // main window is a child of the taskbar. Use FindWindowExW
+                // from the desktop to find it regardless of parenting.
+                let tb = FindWindowW(windows::core::w!("Shell_TrayWnd"), None);
+                let mut w: HWND = HWND::default();
+                if tb.0 != 0 {
+                    w = FindWindowExW(
+                        tb,
+                        None,
+                        windows::core::w!("NetSpeedTaskbarWnd"),
+                        None,
+                    );
+                }
+                if w.0 != 0 {
+                    main_alive = true;
+                }
+            }
+            if !main_alive {
+                // Main instance is dead or a windowless zombie (Explorer
+                // crash destroyed our taskbar-child window but the process
+                // lingered, still holding the single-instance mutex). Kill
+                // any netspeed.exe process OTHER than ourselves so the mutex
+                // is released, then relaunch fresh.
+                use windows::Win32::System::Threading::*;
+                use windows::Win32::System::Diagnostics::ToolHelp::*;
+                let self_pid = GetCurrentProcessId();
+                if let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+                    let mut pe = PROCESSENTRY32W {
+                        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                        ..Default::default()
+                    };
+                    if Process32FirstW(snap, &mut pe).is_ok() {
+                        loop {
+                            let name = String::from_utf16_lossy(&pe.szExeFile);
+                            if name.eq_ignore_ascii_case("netspeed.exe")
+                                && pe.th32ProcessID != self_pid
+                            {
+                                let h = OpenProcess(
+                                    PROCESS_TERMINATE,
+                                    false,
+                                    pe.th32ProcessID,
+                                );
+                                if let Ok(h2) = h {
+                                    let _ = TerminateProcess(h2, 0);
+                                    let _ = CloseHandle(h2);
+                                }
+                            }
+                            if !Process32NextW(snap, &mut pe).is_ok() {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = CloseHandle(snap);
+                }
+                // Give the old process a moment to release the mutex.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                // Launch a fresh main instance.
                 let mut exe = [0u16; 1024];
                 let _ = GetModuleFileNameW(None, &mut exe);
                 let path_len = exe.iter().take_while(|&&c| c != 0).count();
@@ -2133,9 +2194,6 @@ fn watchdog_main() {
                     &mut si,
                     &mut pi,
                 );
-            } else {
-                // Main alive — close our probe handle.
-                let _ = CloseHandle(h.unwrap());
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
