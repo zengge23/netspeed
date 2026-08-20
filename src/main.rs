@@ -285,7 +285,9 @@ impl D2DRenderer {
     }
 
     /// Render the current stats into the swapchain and commit to screen.
-    fn render(&mut self) {
+    /// Returns false if the GPU device was lost (e.g. after a driver update
+    /// or display change) — the caller should rebuild the renderer.
+    fn render(&mut self) -> bool {
         unsafe {
             self.ctx.SetTarget(&self.bitmap);
             self.ctx.BeginDraw();
@@ -610,8 +612,41 @@ impl D2DRenderer {
             }
 
             let _ = self.ctx.EndDraw(None, None);
-            let _ = self.swapchain.Present(1, 0);
+            // Present/Commit can fail with DXGI_ERROR_DEVICE_REMOVED /
+            // DXGI_ERROR_DEVICE_RESET after a driver update, GPU reset, or
+            // display change (common on wake/lock-screen). These are
+            // IGNORED with `let _`, so the renderer keeps drawing to a dead
+            // device and the window goes blank yet stays interactive. Surface
+            // that condition so the caller knows to rebuild the pipeline.
+            let present_ok = self.swapchain.Present(1, 0).is_ok();
             let _ = self.dcomp.Commit();
+            !present_ok
+        }
+    }
+}
+
+/// (Re)build the D2D/DXGI/DComposition renderer for the main window.
+/// Used at startup and to recover from GPU device loss (driver update,
+/// display change, wake) — without a fresh pipeline the window goes blank
+/// yet stays interactive, which the watchdog can't detect.
+unsafe fn rebuild_renderer(hwnd: HWND) {
+    RENDERER = None;
+    let renderer = D2DRenderer::new(hwnd, WINDOW_W as u32, WINDOW_H as u32);
+    if let Some(mut r) = renderer {
+        r.render();
+        RENDERER = Some(r);
+    }
+}
+
+/// Render the current frame; if the GPU device was lost, rebuild the whole
+/// D3D/DXGI/DComposition pipeline once and retry. Present returns
+/// DXGI_ERROR_DEVICE_REMOVED/RESET after a driver swap, so this is the
+/// recovery path for the "window blank but clickable" state.
+unsafe fn render_or_rebuild(hwnd: HWND) {
+    if let Some(renderer) = RENDERER.as_mut() {
+        if renderer.render() {
+            // Device lost — drop everything and recreate it fresh.
+            rebuild_renderer(hwnd);
         }
     }
 }
@@ -777,9 +812,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             // every Present+Commit on a DComposition child forces a reblend
             // of the surface, which flickers when numbers are static.
             if unsafe { DIRTY } {
-                if let Some(renderer) = RENDERER.as_mut() {
-                    renderer.render();
-                }
+                render_or_rebuild(hwnd);
                 unsafe { DIRTY = false; }
             }
             // Refresh the hover panel while it is visible (values move).
@@ -807,9 +840,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 }
             }
             if unsafe { DIRTY } {
-                if let Some(renderer) = RENDERER.as_mut() {
-                    renderer.render();
-                }
+                render_or_rebuild(hwnd);
                 unsafe { DIRTY = false; }
             }
             LRESULT(0)
@@ -884,11 +915,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                     // Recreate the D2D pipeline for the new width, resize the
                     // window and reposition it (compact mode drops the graph
                     // columns; wide mode restores them).
-                    RENDERER = None;
-                    RENDERER = D2DRenderer::new(hwnd, WINDOW_W as u32, WINDOW_H as u32);
-                    if let Some(r) = RENDERER.as_mut() {
-                        r.render();
-                    }
+                    rebuild_renderer(hwnd);
                     reposition(hwnd);
                     DIRTY = true;
                 }
@@ -2285,11 +2312,7 @@ fn main() {
         let _ = ShowWindow(hwnd, SW_SHOW);
         // Build the D2D + DirectComposition pipeline after the window exists
         // and is embedded, then draw the first frame.
-        let renderer = D2DRenderer::new(hwnd, WINDOW_W as u32, WINDOW_H as u32);
-        if let Some(mut r) = renderer {
-            r.render();
-            RENDERER = Some(r);
-        }
+        rebuild_renderer(hwnd);
     }
 
     // Message loop
