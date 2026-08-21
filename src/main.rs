@@ -822,6 +822,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         WM_TIMER if wp.0 == REPOS_TIMER => {
+            // SELF-HEALTH CHECK: if our main window was destroyed (an
+            // Explorer crash destroys the taskbar, which destroys us — but
+            // this process may linger because the hover-panel thread keeps
+            // the message loop alive), we lose our window while the mutex
+            // stays held, so the watchdog wrongly thinks we're fine. Force
+            // our own exit so the watchdog (which keys off the mutex) will
+            // notice and respawn a fresh instance. NOTE: do NOT stop the
+            // watchdog here — the watchdog is exactly what respawns us.
+            if !unsafe { IsWindow(hwnd).as_bool() } {
+                let _ = PostQuitMessage(0);
+                return LRESULT(0);
+            }
             // Reassert position/z-order periodically (taskbar can be
             // re-laid-out by Explorer). When already embedded AND in place,
             // reposition() returns immediately without touching the window —
