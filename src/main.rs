@@ -118,6 +118,13 @@ static mut DIRTY: bool = true;
 static mut GRADIENT_COLOR: bool = true;
 // 悬停详情面板（右键菜单切换）
 static mut SHOW_PANEL: bool = true;
+// Main window handle. Set once at creation; a background thread (see
+// watch_main_window) checks it and force-quits this process if the window
+// is ever destroyed (Explorer crash on lock-screen destroys the taskbar and
+// our child window, but the process lingers because the hover panel keeps
+// the message loop alive — which the watchdog, keyed off the mutex, mistakes
+// for a healthy instance).
+static mut MAIN_HWND: HWND = HWND(0);
 // True = Win11 XAML taskbar (parent Shell_TrayWnd, anchor TrayNotifyWnd);
 // False = Win10 classic taskbar (parent ReBarWindow32, anchor start button).
 static mut TASKBAR_WIN11: bool = true;
@@ -822,18 +829,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             LRESULT(0)
         }
         WM_TIMER if wp.0 == REPOS_TIMER => {
-            // SELF-HEALTH CHECK: if our main window was destroyed (an
-            // Explorer crash destroys the taskbar, which destroys us — but
-            // this process may linger because the hover-panel thread keeps
-            // the message loop alive), we lose our window while the mutex
-            // stays held, so the watchdog wrongly thinks we're fine. Force
-            // our own exit so the watchdog (which keys off the mutex) will
-            // notice and respawn a fresh instance. NOTE: do NOT stop the
-            // watchdog here — the watchdog is exactly what respawns us.
-            if !unsafe { IsWindow(hwnd).as_bool() } {
-                let _ = PostQuitMessage(0);
-                return LRESULT(0);
-            }
             // Reassert position/z-order periodically (taskbar can be
             // re-laid-out by Explorer). When already embedded AND in place,
             // reposition() returns immediately without touching the window —
@@ -2315,6 +2310,25 @@ fn main() {
     };
 
     if hwnd.0 == 0 { return; }
+    unsafe { MAIN_HWND = hwnd; }
+
+    // Background health monitor: if the main window is ever destroyed (an
+    // Explorer crash on lock-screen destroys the taskbar and our child
+    // window), force this process to exit so the watchdog (keyed on the
+    // mutex) notices and respawns a fresh instance. MUST be a dedicated
+    // thread, NOT a WM_TIMER — timers are auto-killed when their window is
+    // destroyed, so an IsWindow check inside REPOS_TIMER would never fire.
+    std::thread::spawn(|| unsafe {
+        loop {
+            if !IsWindow(MAIN_HWND).as_bool() {
+                // Our window died but the process lingers; exit so the
+                // watchdog rebuilds us. Do NOT stop the watchdog.
+                let _ = PostQuitMessage(0);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
 
     // Hover detail panel (hidden until the mouse enters the taskbar window).
     create_panel_window();
